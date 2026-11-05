@@ -1,0 +1,8 @@
+# Heavy artifacts are reproducible from scripts/ and are not tracked.
+data/
+models/
+baselines/
+infra/tool-results/
+__pycache__/
+*.pyc
+.cache/

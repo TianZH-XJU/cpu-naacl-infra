@@ -1,0 +1,102 @@
+{
+  "static": {
+    "timestamp_utc": "2026-11-05T22:16:19.058109+00:00",
+    "platform": "Linux-6.18.35-x86_64-with-glibc2.41",
+    "kernel": "6.18.35",
+    "python": "3.12.15",
+    "virtualization": null,
+    "cpu": {
+      "model": "Intel(R) Xeon(R) 6985P-C CPU @ 2.30GHz",
+      "logical_cpus": 5,
+      "physical_cores": 5,
+      "sockets": 1,
+      "numa_nodes": 1,
+      "isa_flags": {
+        "avx2": true,
+        "avx512f": true,
+        "avx512_vnni": true,
+        "avx_vnni": true,
+        "avx512_bf16": true,
+        "avx512_fp16": true,
+        "fma": true,
+        "amx": false
+      },
+      "governor_scaling": null,
+      "caches_per_core": {
+        "l1d_kib": 48,
+        "l1i_kib": 64,
+        "l2_kib": 2048,
+        "l3_kib": 516096
+      }
+    },
+    "memory_gib": {
+      "total": 5.92,
+      "available": 5.51,
+      "swap_total": 0.0
+    },
+    "disk": {
+      "total_gib": 5949.61,
+      "free_gib": 5465.66
+    }
+  },
+  "benchmarks": {
+    "matmul_thread_scaling": [
+      {
+        "threads": 1,
+        "matmul_size": 1024,
+        "seconds": 0.01189,
+        "gflops": 180.56
+      },
+      {
+        "threads": 2,
+        "matmul_size": 1024,
+        "seconds": 0.00583,
+        "gflops": 368.19
+      },
+      {
+        "threads": 4,
+        "matmul_size": 1024,
+        "seconds": 0.00336,
+        "gflops": 638.63
+      },
+      {
+        "threads": 5,
+        "matmul_size": 1024,
+        "seconds": 0.00291,
+        "gflops": 736.83
+      }
+    ],
+    "memory_bandwidth": {
+      "buffer_mib": 256,
+      "seconds": 0.0125,
+      "bandwidth_gib_s": 40.01
+    },
+    "transformer_layer_thread_scaling": [
+      {
+        "threads": 1,
+        "batch": 32,
+        "seq": 256,
+        "hidden": 384,
+        "ms_per_layer": 253.722
+      },
+      {
+        "threads": 2,
+        "batch": 32,
+        "seq": 256,
+        "hidden": 384,
+        "ms_per_layer": 140.125
+      },
+      {
+        "threads": 5,
+        "batch": 32,
+        "seq": 256,
+        "hidden": 384,
+        "ms_per_layer": 85.477
+      }
+    ]
+  },
+  "software": {
+    "torch": "2.15.0+cpu",
+    "torch_num_threads_default": 5
+  }
+}

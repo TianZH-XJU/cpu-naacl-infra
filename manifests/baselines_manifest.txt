@@ -1,0 +1,7 @@
+CEC-Ranking	https://github.com/alexlimh/CEC-Ranking.git	6bec43b073f6bce67a6f019081d9ec9f6a0025fa
+GAINER	https://github.com/ibrahimjamadi98/GAINER.git	074ac4b0c663ea1ad8a2790a38d83d2c58c3a02c
+SEE-SIGIR25	https://github.com/veneres/SEE-SIGIR25.git	06431a7c8645e2f75eb7b6f54af0cf7b687cad0c
+earlyexiting-monobert	https://github.com/castorini/earlyexiting-monobert.git	29b7ac99989e8a52010b33b15166afc2ced10800
+fast-plaid	https://github.com/lightonai/fast-plaid.git	df2be46ee930d066507a813208e4cfd1117eac74
+mice	https://github.com/xpmir/mice.git	9b8e1fef406793e02c10088d06c431d9fcc8a9a1
+pyserini	https://github.com/castorini/pyserini.git	c846a610e224ff12155519be214bc12a5a794e24

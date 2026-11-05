@@ -1,0 +1,51 @@
+{
+  "generated_utc": "2026-11-05T22:17:33.969807+00:00",
+  "source": "official BeIR HuggingFace repos",
+  "datasets": {
+    "scifact": {
+      "corpus_parquet_sha256": "243324b35f03d82bd6d98a5f575966876e86cad7ce16e5333a35b1b793dc4f45",
+      "queries_parquet_sha256": "1c37956c5dc8b810b60302323c24d1a9e79e26411ba8f5ad9d0888642e2a9034",
+      "corpus_parquet_mib": 4.26,
+      "num_corpus_docs": 5183,
+      "num_queries": 1109,
+      "qrels_rows": {
+        "train": 919,
+        "test": 339
+      }
+    },
+    "nfcorpus": {
+      "corpus_parquet_sha256": "f2a1c0b570a5efdf23cfa36f5e573d062cc113c6e7251e22c69b323a33ea895e",
+      "queries_parquet_sha256": "edd2b878b8130fb3b5e3c4b9428ddc1e67fbd6eedf8ae099fca3b87838ba6b29",
+      "corpus_parquet_mib": 3.01,
+      "num_corpus_docs": 3633,
+      "num_queries": 3237,
+      "qrels_rows": {
+        "train": 110575,
+        "dev": 11385,
+        "test": 12334
+      }
+    },
+    "arguana": {
+      "corpus_parquet_sha256": "18eedd19306ea9adbf83110d74a844dc9501a1bf084def48bfa5a8eab5600b86",
+      "queries_parquet_sha256": "6c08bf568afae82e10b5e93dcd6b589d55be1d2242c1ead8e5244608c6a1a1e7",
+      "corpus_parquet_mib": 4.76,
+      "num_corpus_docs": 8674,
+      "num_queries": 1406,
+      "qrels_rows": {
+        "test": 1406
+      }
+    },
+    "fiqa": {
+      "corpus_parquet_sha256": "b36bb07dab3bfad488190818828e749a52faf5ba391c1d51dac8b06064576f99",
+      "queries_parquet_sha256": "e9b3863724ffd538d8efff19684ef8ae495bdbddd96b35e81bdc39e3e22860d6",
+      "corpus_parquet_mib": 26.42,
+      "num_corpus_docs": 57638,
+      "num_queries": 6648,
+      "qrels_rows": {
+        "train": 14166,
+        "dev": 1238,
+        "test": 1706
+      }
+    }
+  }
+}
