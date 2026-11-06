@@ -51,12 +51,15 @@ class ActiveSetRanker:
         checkpoints=None,
         keep_fn=None,
         compact_threshold=0.75,
+        compact_interval=1,
     ):
         """Run the encoder layer-by-layer with per-candidate early exit.
 
         checkpoints: layer indices (0-based; checkpoint fires AFTER that layer)
         keep_fn(scores, layer_idx): bool tensor of candidates that continue
         compact_threshold: compact the active set when active/total < this
+        compact_interval: attempt compaction only every k layers (1 = every
+            layer); between compactions the full stale batch is executed
         Returns (scores [n], exit_layer [n]); exited candidates keep the score
         from their exit checkpoint, survivors get the full-depth score.
         """
@@ -69,7 +72,11 @@ class ActiveSetRanker:
 
         for i in range(self.num_layers):
             idx = torch.nonzero(active, as_tuple=True)[0]
-            if idx.numel() < n and idx.numel() / n < compact_threshold:
+            if (
+                idx.numel() < n
+                and idx.numel() / n < compact_threshold
+                and i % compact_interval == 0
+            ):
                 h = hidden.index_select(0, idx)
                 m = ext_mask.index_select(0, idx)
                 h = self.forward_layer(h, m, i)
