@@ -1,0 +1,11 @@
+threads:
+  omp: 1
+  mkl: 1
+  openblas: 1
+  numexpr: 1
+  intra_op: 1
+  inter_op: 1
+  execution_mode: ORT_SEQUENTIAL
+tokenizers_parallelism: false
+precision: [fp32, int8_dynamic]
+max_seq_length: 256

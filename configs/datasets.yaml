@@ -1,0 +1,11 @@
+datasets:
+  - name: scifact
+    path: data/scifact
+    test_queries_from: qrels/test.tsv
+  - name: nfcorpus
+    path: data/nfcorpus
+    test_queries_from: qrels/test.tsv
+candidate_run:
+  budget: 100
+  methods: [bm25, dense, rrf]
+  output_dir: data/candidate_runs

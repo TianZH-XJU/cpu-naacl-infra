@@ -1,0 +1,2 @@
+=== perf probe (current process, no system-wide privileges requested) ===
+perf not installed in this sandbox; hardware counters not measured

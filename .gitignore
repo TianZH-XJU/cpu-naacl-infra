@@ -6,3 +6,7 @@ infra/tool-results/
 __pycache__/
 *.pyc
 .cache/
+
+# keep small artifacts, ignore heavy run logs
+artifacts/runs/*.partial.jsonl
+artifacts/runs/*.log

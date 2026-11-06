@@ -1,0 +1,17 @@
+=== cache probe ===
+/sys/devices/system/cpu/cpu0/cache/index0/level: 1
+/sys/devices/system/cpu/cpu0/cache/index1/level: 1
+/sys/devices/system/cpu/cpu0/cache/index2/level: 2
+/sys/devices/system/cpu/cpu0/cache/index3/level: 3
+/sys/devices/system/cpu/cpu0/cache/index0/type: Data
+/sys/devices/system/cpu/cpu0/cache/index1/type: Instruction
+/sys/devices/system/cpu/cpu0/cache/index2/type: Unified
+/sys/devices/system/cpu/cpu0/cache/index3/type: Unified
+/sys/devices/system/cpu/cpu0/cache/index0/size: 48K
+/sys/devices/system/cpu/cpu0/cache/index1/size: 64K
+/sys/devices/system/cpu/cpu0/cache/index2/size: 2048K
+/sys/devices/system/cpu/cpu0/cache/index3/size: 516096K
+/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size: 64
+/sys/devices/system/cpu/cpu0/cache/index1/coherency_line_size: 64
+/sys/devices/system/cpu/cpu0/cache/index2/coherency_line_size: 64
+/sys/devices/system/cpu/cpu0/cache/index3/coherency_line_size: 64

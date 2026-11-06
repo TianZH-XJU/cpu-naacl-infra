@@ -1,0 +1,17 @@
+{
+  "bm25": {
+    "path": "data/candidate_runs/nfcorpus/bm25_top100.jsonl",
+    "queries": 323,
+    "recall_at_100": 0.134
+  },
+  "dense": {
+    "path": "data/candidate_runs/nfcorpus/dense_top100.jsonl",
+    "queries": 323,
+    "recall_at_100": 0.2029
+  },
+  "rrf": {
+    "path": "data/candidate_runs/nfcorpus/rrf_top100.jsonl",
+    "queries": 323,
+    "recall_at_100": 0.2064
+  }
+}

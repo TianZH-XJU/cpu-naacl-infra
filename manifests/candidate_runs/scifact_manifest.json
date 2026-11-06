@@ -1,0 +1,17 @@
+{
+  "bm25": {
+    "path": "data/candidate_runs/scifact/bm25_top100.jsonl",
+    "queries": 300,
+    "recall_at_100": 0.7876
+  },
+  "dense": {
+    "path": "data/candidate_runs/scifact/dense_top100.jsonl",
+    "queries": 300,
+    "recall_at_100": 0.9587
+  },
+  "rrf": {
+    "path": "data/candidate_runs/scifact/rrf_top100.jsonl",
+    "queries": 300,
+    "recall_at_100": 0.9469
+  }
+}
