@@ -243,7 +243,7 @@ class WavefrontScheduler:
                 self.layer_events.append({
                     "event_id": event_id,
                     "layer": layer,
-                    "request_ids": [qid for qid, _ in by_req],
+                    "request_ids": list(by_req.keys()),
                     "request_rows": {qid: len(rows_q)
                                      for qid, (_, rows_q) in by_req.items()},
                     "batch_rows": len(rows),
