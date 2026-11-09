@@ -220,4 +220,23 @@ except ValueError as e:
     print(f"Test E (mixed seq lens): rejected with: {e}")
 print("PASS: mixed sequence lengths rejected")
 
+# ---- Test F: ONLINE mode rejects mixed length buckets UP FRONT (review 2 P1-3)
+# In online mode each request is embedded separately, so a lazy per-request
+# check would never see the cross-request conflict. run() must validate the
+# whole set before any request arrives.
+r64f = build_requests(max_len=64)
+r96f = build_requests(max_len=96)
+for r in r64f:
+    r.arrival = 0.0
+for r in r96f:
+    r.arrival = 0.5   # has NOT arrived when the run starts
+rejected = False
+try:
+    WavefrontScheduler(ranker, checkpoints=()).run(r64f + r96f, online=True)
+except ValueError as e:
+    rejected = True
+    print(f"Test F (online mixed seq lens): rejected up front with: {e}")
+assert rejected, "online mode did NOT reject mixed length buckets up front"
+print("PASS: online mode rejects mixed length buckets before any arrival")
+
 print("ALL PASS")

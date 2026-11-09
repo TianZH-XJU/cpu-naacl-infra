@@ -10,6 +10,8 @@ Per (T, L, N) shape, records:
   ort_int8     full forward via ORT dynamic-INT8 session
   compact      index_select + forward + index_copy on half the rows
   exit_head    trained exit-head MLP on N rows
+  gather2      index_select + index_copy over a two-variable surface
+               (source rows N_src, kept rows K) — review 2 P0-1B
 
 N includes 200 to test the cross-query batching basis (RQ3):
 t(200xL) vs 2 x t(100xL).
@@ -75,6 +77,12 @@ def main():
     parser.add_argument("--backends", choices=["torch", "ort", "both"], default="both",
                         help="run torch and ORT in separate processes to stay "
                              "under the memory cgroup limit")
+    parser.add_argument("--gather-src-sizes", type=int, nargs="+",
+                        default=[100, 200, 256],
+                        help="source-row counts N for the gather2 surface")
+    parser.add_argument("--gather-keep-sizes", type=int, nargs="+",
+                        default=[1, 5, 10, 25, 50, 75, 100, 150, 200],
+                        help="kept-row counts K for the gather2 surface")
     parser.add_argument("--out", default="artifacts/runs/cost_grid.jsonl")
     args = parser.parse_args()
 
@@ -88,7 +96,10 @@ def main():
                 except json.JSONDecodeError:
                     continue
                 if r.get("event") == "cost_grid":
-                    done.add((r["threads"], r["N"], r["L"], r["kind"]))
+                    if r.get("kind") == "gather2":
+                        done.add((r["threads"], r["N"], r["K"], r["L"], r["kind"]))
+                    else:
+                        done.add((r["threads"], r["N"], r["L"], r["kind"]))
     print(f"resuming: {len(done)} measurements already recorded", flush=True)
 
     log = JsonlLogger(args.out, run_meta={
@@ -125,6 +136,40 @@ def main():
                 except Exception as e:
                     print(f"ORT quantize={quantize} unavailable: {e}", flush=True)
         for L in args.seq_lens:
+            # two-variable gather surface C_gather(N_src, K): the real
+            # scheduler gathers K rows out of an N_src-row source tensor
+            # (hidden + attention mask), then index_copy-s back — review
+            # 2 P0-1B. Measured once per (T, L), independent of the N loop
+            # (so it also runs when all per-N torch kinds are already done).
+            if run_torch:
+                todo_g2 = run_torch and any(
+                    (T, ns, K, L, "gather2") not in done
+                    for ns in args.gather_src_sizes
+                    for K in args.gather_keep_sizes)
+                if todo_g2:
+                    for N_src in args.gather_src_sizes:
+                        ids2, am2, tt2 = make_inputs(tokenizer, N_src, L, vocab)
+                        with torch.inference_mode():
+                            h2, m2 = ranker.embed(ids2, am2, tt2)
+                            for K in args.gather_keep_sizes:
+                                if (T, N_src, K, L, "gather2") in done:
+                                    continue
+                                idx2 = torch.randperm(N_src)[:K]
+
+                                def gather2_only():
+                                    g = h2.index_select(0, idx2)
+                                    m = m2.index_select(0, idx2)
+                                    return h2.index_copy(0, idx2, g), m
+                                reps2 = args.reps
+                                est = bench(lambda: h2.index_select(0, idx2), 3, 5)["p50_ms"]
+                                if est * reps2 > 60:
+                                    reps2 = max(args.min_reps, int(60 / est))
+                                r = bench(gather2_only, args.warmup, reps2)
+                                log.write({"event": "cost_grid", "threads": T,
+                                           "N": N_src, "K": K, "L": L,
+                                           "torch_num_threads": torch.get_num_threads(),
+                                           "kind": "gather2", **r})
+                        del h2, m2
             for N in args.batch_sizes:
                 rec_base = {"event": "cost_grid", "threads": T, "N": N, "L": L,
                             "torch_num_threads": torch.get_num_threads()}

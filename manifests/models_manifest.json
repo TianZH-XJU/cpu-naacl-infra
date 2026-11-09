@@ -1,35 +1,114 @@
 {
-  "generated_utc": "2026-11-05T22:18:17.853435+00:00",
+  "generated_utc": "2026-11-09T21:02:18.893001+00:00",
+  "note": "revisions are immutable HF commit SHAs; file hashes are SHA-256",
   "models": {
     "BAAI/bge-small-en-v1.5": {
       "repo_id": "BAAI/bge-small-en-v1.5",
+      "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
       "local_path": "models/bge-small-en-v1.5",
-      "size_mib": 255.51
+      "size_mib": 255.51,
+      "files": {
+        "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a.json": "dd48559d562fd85f5ea033474fc3d1bc465bb02ac0a78367c2776b2a33fe95df",
+        "config.json": "094f8e891b932f2000c92cfc663bac4c62069f5d8af5b5278c4306aef3084750",
+        "model.safetensors": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
+        "modules.json": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf",
+        "pytorch_model.bin": "84868a67d847f7f37d1df745b73a4c20b5bc0a797c87a23b265f8a0131728b88",
+        "sentence_bert_config.json": "84e39fda68ccbff05bfa723ae9c0e70e23e2ec373b76e0f8c6e71af72a693cbf",
+        "special_tokens_map.json": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3",
+        "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "tokenizer_config.json": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3",
+        "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+      }
     },
     "sentence-transformers/all-MiniLM-L6-v2": {
       "repo_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
       "local_path": "models/all-MiniLM-L6-v2",
-      "size_mib": 174.01
+      "size_mib": 174.01,
+      "files": {
+        "1110a243fdf4706b3f48f1d95db1a4f5529b4d41.json": "ffde918af41fb7f718dcf0592de7e6dfe5ef0b44bcb64b25d1709752eba93cf5",
+        "config.json": "953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41",
+        "model.safetensors": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+        "modules.json": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf",
+        "pytorch_model.bin": "c3a85f238711653950f6a79ece63eb0ea93d76f6a6284be04019c53733baf256",
+        "sentence_bert_config.json": "fc1993fde0a95c24ec6c022539d41cf6e2f7c9721e5415d6fb6897472a9cd4b7",
+        "special_tokens_map.json": "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3",
+        "tokenizer.json": "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037",
+        "tokenizer_config.json": "acb92769e8195aabd29b7b2137a9e6d6e25c476a4f15aa4355c233426c61576b",
+        "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+      }
     },
     "cross-encoder/ms-marco-TinyBERT-L-2-v2": {
       "repo_id": "cross-encoder/ms-marco-TinyBERT-L-2-v2",
+      "revision": "81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc",
       "local_path": "models/ms-marco-TinyBERT-L-2-v2",
-      "size_mib": 34.4
+      "size_mib": 55.45,
+      "files": {
+        "81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc.json": "504f50a54a5fb7d137be215188dd8bfc199bb014f3a4c25911ee7dfcc5c4fe5a",
+        "config.json": "2144195e107cd7ea61556478e7add12986ebfbc3085f924fc0b90c2410604879",
+        "model.fp32.onnx": "39b1650810c16c546227772359b50672b2ea8b858255e583a730fde355d070be",
+        "model.int8.onnx": "8bc4afb9ae2b837e9a7585719e0ff9ebedc9401a77579f73e658309ef6f8733b",
+        "model.safetensors": "a0e7364ddf91ff7028f1102e1b91ac7a72e3db4061241bd84efe45c72c9af03a",
+        "pytorch_model.bin": "17110c74b1e615554fa3a9242c36210dd36defe6946e819c2e80872b3508aae9",
+        "special_tokens_map.json": "3c3507f36dff57bce437223db3b3081d1e2b52ec3e56ee55438193ecb2c94dd6",
+        "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "tokenizer_config.json": "a5c2e5a7b1a29a0702cd28c08a399b5ecc110c263009d17f7e3b415f25905fd8",
+        "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+      }
     },
     "cross-encoder/ms-marco-MiniLM-L-2-v2": {
       "repo_id": "cross-encoder/ms-marco-MiniLM-L-2-v2",
+      "revision": "1b5cd67b15209f24824c50370e0397743aa9b787",
       "local_path": "models/ms-marco-MiniLM-L-2-v2",
-      "size_mib": 120.07
+      "size_mib": 194.69,
+      "files": {
+        "1b5cd67b15209f24824c50370e0397743aa9b787.json": "4788596bf94cac4caf301f961c48697b0b13ca6527b1dfab4a0ef30ec447e767",
+        "config.json": "7868e36c3024c21f7a3ac64e058b36898a331035784cce7ec1496b434aa44c4f",
+        "model.fp32.onnx": "8845c5ff301a99c0c09c998e1164a761bd8456db830e9098da60d46a6b764e0f",
+        "model.int8.onnx": "9f8138f55992bc8fb8409fbb3405919dd1a51e994e9712936ea5c3ddf1d6c65a",
+        "model.safetensors": "88f11fa671e11c53b5cfe88bb6594139ec4991eaf8cf6a10bd61c9abbc4f691a",
+        "pytorch_model.bin": "e92ec9f854a5d8651f86db03375c55f4e4f893b7518177d4f2c8e31e3b9013a1",
+        "special_tokens_map.json": "3c3507f36dff57bce437223db3b3081d1e2b52ec3e56ee55438193ecb2c94dd6",
+        "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "tokenizer_config.json": "a5c2e5a7b1a29a0702cd28c08a399b5ecc110c263009d17f7e3b415f25905fd8",
+        "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+      }
     },
     "cross-encoder/ms-marco-MiniLM-L-4-v2": {
       "repo_id": "cross-encoder/ms-marco-MiniLM-L-4-v2",
+      "revision": "777b2f369bc1c2f850df8bd367ed1654bda4497b",
       "local_path": "models/ms-marco-MiniLM-L-4-v2",
-      "size_mib": 147.17
+      "size_mib": 238.83,
+      "files": {
+        "777b2f369bc1c2f850df8bd367ed1654bda4497b.json": "7f7b033079a7d7c02e9fef09a4eae3af5f5899a04741bfac4265a5f487588e2c",
+        "config.json": "0349c3fb99c7c59d75529c12932e7663bf1d27ca4d8ee0a5202410466deba657",
+        "model.fp32.onnx": "54f248402f758520dc29f7ffcfd234f8b6134d5555d2e33c24f956999cc2a40a",
+        "model.int8.onnx": "a2da69374caa02f3031eba9a5b5ed014c68835a144713ba0f4287ac11d4148b1",
+        "model.safetensors": "3db1c98132b54901976d6da56fa711756c7780a6263d5db8f336232584f5fe58",
+        "pytorch_model.bin": "943560a8b409a98f7b1addf7f93d0c09efb2a3027daa12680ab3cf07b7298fe7",
+        "special_tokens_map.json": "3c3507f36dff57bce437223db3b3081d1e2b52ec3e56ee55438193ecb2c94dd6",
+        "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "tokenizer_config.json": "a5c2e5a7b1a29a0702cd28c08a399b5ecc110c263009d17f7e3b415f25905fd8",
+        "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+      }
     },
     "cross-encoder/ms-marco-MiniLM-L-6-v2": {
       "repo_id": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+      "revision": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
       "local_path": "models/ms-marco-MiniLM-L-6-v2",
-      "size_mib": 174.26
+      "size_mib": 282.96,
+      "files": {
+        "233902d25c440f23af6f7d6e94d2946bac0bee0a.json": "ed2af7859b2f5d8488e909e3c4758ce2c49b598a7f3df7d23942b560d3c885da",
+        "config.json": "380e02c93f431831be65d99a4e7e5f67c133985bf2e77d9d4eba46847190bacc",
+        "model.fp32.onnx": "41742653e1712d0fec080f487d0162fd296eae32dd548ca8c83423dc55bdecc6",
+        "model.int8.onnx": "94b74cb47dc7d154e346594cb05a814b837c91931a53bd10a5dd6dfe9e24ab1d",
+        "model.safetensors": "821d1aa69520101d6e0737f78a042ae25b19e5cb9160701909d10434f4aeb0ae",
+        "pytorch_model.bin": "3ae17b87eda3d184502a821fddff43d82feb7c206f665a851c491ec715b497ed",
+        "special_tokens_map.json": "3c3507f36dff57bce437223db3b3081d1e2b52ec3e56ee55438193ecb2c94dd6",
+        "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "tokenizer_config.json": "a5c2e5a7b1a29a0702cd28c08a399b5ecc110c263009d17f7e3b415f25905fd8",
+        "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+      }
     }
   }
 }

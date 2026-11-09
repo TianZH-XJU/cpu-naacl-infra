@@ -26,6 +26,7 @@ labeled "real". The sim is validated against real runs; sim p95/p99 are NOT
 presented as measured serving latency.
 """
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -40,7 +41,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cpu_cast import data, metrics  # noqa: E402
 from cpu_cast.active_set import ActiveSetRanker  # noqa: E402
 from cpu_cast.logging_utils import JsonlLogger  # noqa: E402
-from cpu_cast.scheduler import Request, WavefrontScheduler  # noqa: E402
+from cpu_cast.scheduler import (Request, SerialScheduler,  # noqa: E402
+                                WavefrontScheduler)
 
 
 def git_sha():
@@ -49,6 +51,23 @@ def git_sha():
             ["git", "rev-parse", "HEAD"], text=True).strip()[:12]
     except Exception:
         return "unknown"
+
+
+def git_state():
+    """Provenance (review 2 P2): HEAD sha, dirty flag and a hash of the
+    working-tree diff, so a run executed on a dirty tree is identifiable."""
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True).strip()[:12]
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], text=True).strip())
+        diff_sha = "clean"
+        if dirty:
+            diff = subprocess.check_output(["git", "diff"], text=True)
+            diff_sha = hashlib.sha256(diff.encode()).hexdigest()[:12]
+        return {"git_sha": sha, "git_dirty": dirty, "git_diff_sha": diff_sha}
+    except Exception:
+        return {"git_sha": "unknown", "git_dirty": None, "git_diff_sha": None}
 
 
 # ---------------------------------------------------------------------------
@@ -71,10 +90,16 @@ class CostTable:
                     rows.append(r)
         if not rows:
             raise RuntimeError(f"no cost_grid rows for threads={threads} L={seq_len}")
-        self.tables = {"embed": {}, "layer": {}, "gather": {}, "score": {},
-                       "exit_head": {}}
+        self.tables = {"embed": {}, "layer": {}, "gather": {}, "gather2": {},
+                       "score": {}, "exit_head": {}}
         for r in rows:
-            if r["kind"] in self.tables:
+            if r["kind"] == "gather2":
+                # two-variable gather surface: (source rows N, kept rows K);
+                # skip invalid K > N_src entries (randperm(N)[:K] yields only
+                # N rows, so those measurements do not test what they claim)
+                if r["K"] <= r["N"]:
+                    self.tables["gather2"].setdefault(r["N"], {})[r["K"]] = r["p50_ms"]
+            elif r["kind"] in self.tables:
                 self.tables[r["kind"]][r["N"]] = r["p50_ms"]
         self.ns = sorted(self.tables["layer"])
 
@@ -101,11 +126,39 @@ class CostTable:
         w = (n - lo) / (hi - lo)
         return table[lo] * (1 - w) + table[hi] * w
 
+    @staticmethod
+    def _interp_axis(table, n):
+        """1-D linear interp/extrapolation over one axis of a nested table."""
+        if not table or n <= 0:
+            return 0.0
+        ns = sorted(table)
+        if n <= ns[0]:
+            return table[ns[0]]
+        if n >= ns[-1]:
+            lo, hi = ns[-2], ns[-1]
+            slope = (table[hi] - table[lo]) / (hi - lo)
+            return table[hi] + slope * (n - hi)
+        import bisect
+        i = bisect.bisect_left(ns, n)
+        lo, hi = ns[i - 1], ns[i]
+        w = (n - lo) / (hi - lo)
+        return table[lo] * (1 - w) + table[hi] * w
+
     def layer_ms(self, n):
         return self._interp("layer", n)
 
     def gather_ms(self, n_from, n_keep):
-        return self._interp("gather", n_from)
+        """C_gather(N, K): source rows N, kept rows K (review P0-1B).
+
+        Bilinear over the measured gather2 surface; falls back to the
+        single-variable gather table when gather2 is unavailable.
+        """
+        g2 = self.tables.get("gather2") or {}
+        if not g2:
+            return self._interp("gather", n_from)
+        # interpolate on the K axis for each measured N, then on the N axis
+        per_n = {n: self._interp_axis(row, n_keep) for n, row in g2.items()}
+        return self._interp_axis(per_n, n_from)
 
     def embed_ms(self, n):
         return self._interp("embed", n)
@@ -304,8 +357,10 @@ def service_time_serial(tr, cost):
     t = cost.embed_ms(n_total)
     for entry in tr["ledger"]:
         if entry["compacted"]:
-            # gather priced by rows actually gathered (same unit as wavefront)
-            t += cost.gather_ms(entry["exec_rows"], entry["exec_rows"])
+            # gather priced as C_gather(source rows, kept rows): the serial
+            # path gathers exec_rows rows out of the full n_total-row hidden
+            # (review P0-1C — the source is the request's full tensor)
+            t += cost.gather_ms(n_total, entry["exec_rows"])
         t += cost.layer_ms(entry["exec_rows"])
         if entry["scored_rows"]:
             t += cost.score_ms(entry["scored_rows"])
@@ -369,6 +424,9 @@ def simulate_wavefront(traces, arrivals, cost, checkpoints, num_layers,
         for qid, t in arrivals.due(clock):
             n = traces[qid]["ledger"][0]["exec_rows"]
             state[qid] = {"next": [0] * n, "done": [False] * n}
+            # P0-1A: the real scheduler embeds at activation INSIDE the timed
+            # region; charge the same here so both paths carry embedding cost
+            clock += cost.embed_ms(n)
         ready = {}
         for qid, st in state.items():
             for row, (nl, dn) in enumerate(zip(st["next"], st["done"])):
@@ -388,9 +446,10 @@ def simulate_wavefront(traces, arrivals, cost, checkpoints, num_layers,
             per_req[q] = per_req.get(q, 0) + 1
         # same pricing as serial: layer cost + per-request gather
         t = cost.layer_ms(n_batch)
-        # gather priced by rows actually gathered by each request in this
-        # chunk (NOT the layer-0 exec_rows: later layers see survivors)
-        t += sum(cost.gather_ms(k, k) for q, k in per_req.items())
+        # gather priced as C_gather(source rows, kept rows): each request
+        # gathers k rows out of its full hidden (ledger layer-0 exec_rows = n)
+        t += sum(cost.gather_ms(traces[q]["ledger"][0]["exec_rows"], k)
+                 for q, k in per_req.items())
         clock += t
         by_q = {}
         for q, row in rows:
@@ -506,7 +565,8 @@ def main():
     ranker = ActiveSetRanker(args.model)
     L = ranker.num_layers
     log = JsonlLogger(args.out, run_meta={
-        "stage": "stage4", "version": "v2", "run_id": run_id, "git_sha": git_sha(),
+        "stage": "stage4", "version": "v4", "run_id": run_id,
+        **git_state(),
         "dataset": args.dataset, "model": args.model,
         "num_queries": args.num_queries, "keep_frac": args.keep_frac,
         "max_length": args.max_length, "threads": args.threads,
@@ -618,11 +678,13 @@ def main():
               f"p95={np.percentile(lats, 95):.0f}ms", flush=True)
 
     # real wavefront, ONLINE staggered arrivals -> true request-level latency
+    # (same deterministic arrival trace as the serial online scheduler below)
+    arrival_trace_ms = [i * args.stagger_light_ms for i in range(len(load_reqs))]
     for rep in range(args.reps):
         online_reqs = build_requests(runs, d["queries"], d["corpus"], qids,
                                      tokenizer, args.max_length)
         for i, r in enumerate(online_reqs):
-            r.arrival = i * args.stagger_light_ms / 1000.0
+            r.arrival = arrival_trace_ms[i] / 1000.0
         sched = WavefrontScheduler(ranker, checkpoints=checkpoints, signal="pooler",
                                    keep_fn=lambda s, layer: s >= thresholds[layer])
         t0 = time.perf_counter()
@@ -634,38 +696,57 @@ def main():
                       "first_layer_ms": round(((r.first_exec_time or 0) - t0) * 1000, 1),
                       "finish_ms": round(((r.finish_time or 0) - t0) * 1000, 1),
                       "latency_ms": round(float(lats[i]), 1),
+                      "embed_ms": round(getattr(r, "embed_ms", 0.0) or 0.0, 3),
                       "layer_log": r.layer_log}
                      for i, r in enumerate(online_reqs)]
         log.write({"event": "real_wavefront_online", "rep": rep,
+                   "stagger_ms": args.stagger_light_ms,
+                   "arrival_trace_ms": arrival_trace_ms,
+                   "total_s": round(total_s, 3),
+                   "p50_ms": round(float(np.percentile(lats, 50)), 1),
+                   "p95_ms": round(float(np.percentile(lats, 95)), 1),
+                   "p99_ms": round(float(np.percentile(lats, 99)), 1),
+                   "requests": req_trace,
+                   "layer_events": sched.layer_events})
+        print(f"real online wavefront rep{rep}: p50={np.percentile(lats, 50):.0f}ms "
+              f"p95={np.percentile(lats, 95):.0f}ms p99={np.percentile(lats, 99):.0f}ms",
+              flush=True)
+
+    # real serial ONLINE scheduler on the SAME arrival trace (review 2 P0-2):
+    # a real one-worker FIFO loop that sleeps until each arrival and executes
+    # to completion — NOT a measured-service-time replay. Both schedulers see
+    # identical deterministic arrival offsets, so the arrival trace matches.
+    arrival_trace_ms = [i * args.stagger_light_ms for i in range(len(load_reqs))]
+    for rep in range(args.reps):
+        online_reqs_s = build_requests(runs, d["queries"], d["corpus"], qids,
+                                       tokenizer, args.max_length)
+        for i, r in enumerate(online_reqs_s):
+            r.arrival = arrival_trace_ms[i] / 1000.0
+        ssched = SerialScheduler(ranker, thresholds=thresholds,
+                                 checkpoints=checkpoints)
+        t0 = time.perf_counter()
+        ssched.run(online_reqs_s, online=True)
+        total_s = time.perf_counter() - t0
+        lats = [(r.finish_time - t0) * 1000 - r.arrival * 1000
+                for r in online_reqs_s]
+        req_trace = [{"qid": r.qid, "arrival_ms": r.arrival * 1000,
+                      "submit_ms": round((r.submit_time or 0) * 1000, 1),
+                      "first_exec_ms": round(((r.first_exec_time or 0) - t0) * 1000, 1),
+                      "finish_ms": round(((r.finish_time or 0) - t0) * 1000, 1),
+                      "latency_ms": round(float(lats[i]), 1),
+                      "layer_log": r.layer_log}
+                     for i, r in enumerate(online_reqs_s)]
+        log.write({"event": "real_serial_online", "rep": rep,
+                   "mode": "real_online_scheduler",
                    "stagger_ms": args.stagger_light_ms,
                    "total_s": round(total_s, 3),
                    "p50_ms": round(float(np.percentile(lats, 50)), 1),
                    "p95_ms": round(float(np.percentile(lats, 95)), 1),
                    "p99_ms": round(float(np.percentile(lats, 99)), 1),
                    "requests": req_trace})
-        print(f"real online wavefront rep{rep}: p50={np.percentile(lats, 50):.0f}ms "
+        print(f"real online serial rep{rep}: p50={np.percentile(lats, 50):.0f}ms "
               f"p95={np.percentile(lats, 95):.0f}ms p99={np.percentile(lats, 99):.0f}ms",
               flush=True)
-
-    # real serial reference under the same staggered arrival (FIFO single worker)
-    for rep in range(args.reps):
-        services = []
-        for r in load_reqs:
-            t1 = time.perf_counter()
-            collect_trace(ranker, r, checkpoints, thresholds)
-            services.append((time.perf_counter() - t1) * 1000.0)
-        arr = [i * args.stagger_light_ms for i in range(len(load_reqs))]
-        lats, free = [], 0.0
-        for i, s in enumerate(services):
-            start = max(arr[i], free)
-            lat = start + s - arr[i]
-            lats.append(lat)
-            free = start + s
-        log.write({"event": "real_serial_online", "rep": rep,
-                   "stagger_ms": args.stagger_light_ms,
-                   "p50_ms": round(float(np.percentile(lats, 50)), 1),
-                   "p95_ms": round(float(np.percentile(lats, 95)), 1),
-                   "p99_ms": round(float(np.percentile(lats, 99)), 1)})
 
     # ---- strong baseline: cascade_shallow on the same queries (P1-7) ----
     t0 = time.perf_counter()

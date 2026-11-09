@@ -3,6 +3,7 @@
 Downloads only the files needed for CPU inference (config, tokenizer, weights).
 Writes a manifest with repo id, revision, and local size.
 """
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,19 +21,33 @@ ALLOW = [
 ]
 
 MODELS_TO_FETCH = [
-    # (repo_id, pinned_revision) — revisions fixed for reproducibility (P2);
+    # (repo_id, pinned_revision) — immutable HF commit SHAs (P2, second review);
     # re-running the download reproduces byte-identical weights.
-    ("BAAI/bge-small-en-v1.5", "main"),
-    ("sentence-transformers/all-MiniLM-L6-v2", "main"),
-    ("cross-encoder/ms-marco-TinyBERT-L-2-v2", "main"),
-    ("cross-encoder/ms-marco-MiniLM-L-2-v2", "main"),
-    ("cross-encoder/ms-marco-MiniLM-L-4-v2", "main"),
-    ("cross-encoder/ms-marco-MiniLM-L-6-v2", "main"),
+    ("BAAI/bge-small-en-v1.5",
+     "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"),
+    ("sentence-transformers/all-MiniLM-L6-v2",
+     "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"),
+    ("cross-encoder/ms-marco-TinyBERT-L-2-v2",
+     "81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc"),
+    ("cross-encoder/ms-marco-MiniLM-L-2-v2",
+     "1b5cd67b15209f24824c50370e0397743aa9b787"),
+    ("cross-encoder/ms-marco-MiniLM-L-4-v2",
+     "777b2f369bc1c2f850df8bd367ed1654bda4497b"),
+    ("cross-encoder/ms-marco-MiniLM-L-6-v2",
+     "233902d25c440f23af6f7d6e94d2946bac0bee0a"),
 ]
 
 
 def dir_size_mib(path: Path) -> float:
     return round(sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 2**20, 2)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def main() -> None:
@@ -47,7 +62,8 @@ def main() -> None:
             allow_patterns=ALLOW,
         )
         entry = {"repo_id": repo_id, "revision": revision,
-                 "local_path": str(Path(path).relative_to(REPO)), "size_mib": dir_size_mib(local)}
+                 "local_path": str(Path(path).relative_to(REPO)), "size_mib": dir_size_mib(local),
+                 "files": {f.name: sha256_file(f) for f in sorted(local.rglob("*")) if f.is_file()}}
         manifest["models"][repo_id] = entry
         print(f"  -> {entry['local_path']} ({entry['size_mib']} MiB)")
     out = MANIFESTS / "models_manifest.json"

@@ -11,6 +11,10 @@
       "qrels_rows": {
         "train": 919,
         "test": 339
+      },
+      "qrels_sha256": {
+        "test.tsv": "68c0ac63f1c24b9e8ce497649694f09b2d0850bab7ec2b103cc66996f5f8b3a3",
+        "train.tsv": "ac0902d9b1cb717df182aaff1306175877fdb8f55bb5c3e8597ad694fc8e539f"
       }
     },
     "nfcorpus": {
@@ -23,6 +27,11 @@
         "train": 110575,
         "dev": 11385,
         "test": 12334
+      },
+      "qrels_sha256": {
+        "dev.tsv": "e28db4337c8f195b9fda0168759b12de5a051d57e5a08356344a86d730efc8ee",
+        "test.tsv": "680b4cb9f2f3b02a98f4f4f59fc55c57f534fde405335a34e9de2e64ac8a8193",
+        "train.tsv": "3f12c9f6bd56f05fa9887263ca45175c24a8754ed03c86bed5e5d581c6ac1d3a"
       }
     },
     "arguana": {
@@ -33,6 +42,9 @@
       "num_queries": 1406,
       "qrels_rows": {
         "test": 1406
+      },
+      "qrels_sha256": {
+        "test.tsv": "1301f21f91381031cac9d93c798fbd69793547c703f9f221db791124374103db"
       }
     },
     "fiqa": {
@@ -45,6 +57,11 @@
         "train": 14166,
         "dev": 1238,
         "test": 1706
+      },
+      "qrels_sha256": {
+        "dev.tsv": "40ac42f684805bf19835ab5e3ac374c14fb2fb571712335c884f6adfc0a570dd",
+        "test.tsv": "eea88080cf91d63c81d43f28ee301f617304b61f4aaceac310d7385e90d5c060",
+        "train.tsv": "e1a5a7d8a26068c278b30bfbb747725ff297b2ad702d3ed1c50d2ca908f57cf6"
       }
     }
   },
@@ -56,5 +73,7 @@
     "data/candidate_runs/scifact/rrf_top100.jsonl": "0b614c6f1b2608ebbdf70e7135a796343a3548906c4245448140a1080831e66f",
     "data/candidate_runs/scifact/bm25_top100.jsonl": "f1d983fec60a242868cdeb7bddb1d24ad595e36b494088821366cbb048c8dbc8",
     "data/candidate_runs/scifact/dense_top100.jsonl": "505d3c093db64a2c31e27ae12f1deaf4988658c7c536a01fb82469fa1cb6074d"
-  }
+  },
+  "updated_utc": "2026-11-09T21:02:43.945212+00:00",
+  "note": "qrels_sha256 added for training-data traceability"
 }
