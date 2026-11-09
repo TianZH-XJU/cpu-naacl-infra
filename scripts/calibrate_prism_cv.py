@@ -72,7 +72,7 @@ def build_train_pools(args, d):
 def kmeans1d(s, k=3, n_init=3, seed=0):
     """1-D k-means matching sklearn KMeans(n_init=3, random_state=0) closely
     enough for threshold calibration."""
-    best_inertia, best_labels = None, None
+    best_inertia, best_labels, best_centers = None, None, None
     x = s.reshape(-1, 1).astype(np.float64)
     rng = np.random.RandomState(seed)
     for _ in range(n_init):
@@ -87,8 +87,10 @@ def kmeans1d(s, k=3, n_init=3, seed=0):
             centers = new
         inertia = sum(((x[labels == j] - centers[j]) ** 2).sum() for j in range(k))
         if best_inertia is None or inertia < best_inertia:
-            best_inertia, best_labels = inertia, labels
-    return best_labels, centers
+            # keep labels AND centers from the same init (bug fix: previously
+            # the returned centers came from the last init, not the best one)
+            best_inertia, best_labels, best_centers = inertia, labels, centers.copy()
+    return best_labels, best_centers
 
 
 def simulate_prism(ckpt_scores, final_scores, doc_ids, cv):

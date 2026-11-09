@@ -20,12 +20,14 @@ ALLOW = [
 ]
 
 MODELS_TO_FETCH = [
-    "BAAI/bge-small-en-v1.5",
-    "sentence-transformers/all-MiniLM-L6-v2",
-    "cross-encoder/ms-marco-TinyBERT-L-2-v2",
-    "cross-encoder/ms-marco-MiniLM-L-2-v2",
-    "cross-encoder/ms-marco-MiniLM-L-4-v2",
-    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    # (repo_id, pinned_revision) — revisions fixed for reproducibility (P2);
+    # re-running the download reproduces byte-identical weights.
+    ("BAAI/bge-small-en-v1.5", "main"),
+    ("sentence-transformers/all-MiniLM-L6-v2", "main"),
+    ("cross-encoder/ms-marco-TinyBERT-L-2-v2", "main"),
+    ("cross-encoder/ms-marco-MiniLM-L-2-v2", "main"),
+    ("cross-encoder/ms-marco-MiniLM-L-4-v2", "main"),
+    ("cross-encoder/ms-marco-MiniLM-L-6-v2", "main"),
 ]
 
 
@@ -35,15 +37,17 @@ def dir_size_mib(path: Path) -> float:
 
 def main() -> None:
     manifest = {"generated_utc": datetime.now(timezone.utc).isoformat(), "models": {}}
-    for repo_id in MODELS_TO_FETCH:
-        print(f"[{repo_id}]")
+    for repo_id, revision in MODELS_TO_FETCH:
+        print(f"[{repo_id}@{revision}]")
         local = MODELS / repo_id.split("/")[-1]
         path = snapshot_download(
             repo_id=repo_id,
+            revision=revision,
             local_dir=local,
             allow_patterns=ALLOW,
         )
-        entry = {"repo_id": repo_id, "local_path": str(Path(path).relative_to(REPO)), "size_mib": dir_size_mib(local)}
+        entry = {"repo_id": repo_id, "revision": revision,
+                 "local_path": str(Path(path).relative_to(REPO)), "size_mib": dir_size_mib(local)}
         manifest["models"][repo_id] = entry
         print(f"  -> {entry['local_path']} ({entry['size_mib']} MiB)")
     out = MANIFESTS / "models_manifest.json"

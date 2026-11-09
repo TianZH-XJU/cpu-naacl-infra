@@ -4,7 +4,7 @@
 
 ## 0. 范围与设置
 
-- 数据集：scifact（100 条 test query 子集），固定候选 run `data/candidate_runs/scifact/rrf_top100.jsonl`（BM25+dense RRF top-100，Recall@100=0.9587）
+- 数据集：scifact（100 条 test query 子集），固定候选 run `data/candidate_runs/scifact/rrf_top100.jsonl`（BM25+dense RRF top-100，Recall@100=0.9469；dense 单路为 0.9587——早期报告误将 dense 召回记在 RRF run 上，已按 manifests/candidate_runs/scifact_manifest.json 更正）
 - 主模型：`cross-encoder/ms-marco-MiniLM-L6-v2`（6 层），检查点层 {1, 3}
 - 评分方式：rank-based（分数→排名→N−rank），保证跨方法可比
 - 指标：nDCG@10、MRR、p50/p95/p99 延迟、layers_eq（层当量）、top-10 agreement vs full-depth

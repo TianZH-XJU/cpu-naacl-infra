@@ -10,3 +10,4 @@ huggingface_hub
 datasets
 pandas
 psutil
+rank_bm25

@@ -47,5 +47,14 @@
         "test": 1706
       }
     }
+  },
+  "qrels_sha256": {
+    "scifact/train": "ac0902d9b1cb717df182aaff1306175877fdb8f55bb5c3e8597ad694fc8e539f",
+    "scifact/test": "68c0ac63f1c24b9e8ce497649694f09b2d0850bab7ec2b103cc66996f5f8b3a3"
+  },
+  "candidate_run_sha256": {
+    "data/candidate_runs/scifact/rrf_top100.jsonl": "0b614c6f1b2608ebbdf70e7135a796343a3548906c4245448140a1080831e66f",
+    "data/candidate_runs/scifact/bm25_top100.jsonl": "f1d983fec60a242868cdeb7bddb1d24ad595e36b494088821366cbb048c8dbc8",
+    "data/candidate_runs/scifact/dense_top100.jsonl": "505d3c093db64a2c31e27ae12f1deaf4988658c7c536a01fb82469fa1cb6074d"
   }
 }

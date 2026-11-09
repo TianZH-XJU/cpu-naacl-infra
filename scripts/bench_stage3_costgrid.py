@@ -109,24 +109,29 @@ def main():
             h.load_state_dict(torch.load(Path(args.heads) / f"exit_head_{i}.pt", weights_only=True))
             heads.append(h.eval())
 
+    # NOTE: ORT sessions are created per thread-count inside the T loop so the
+    # recorded thread label matches the actual session configuration.
     ort = {}
-    if run_ort:
-        for quantize in (False, True):
-            try:
-                ort["int8" if quantize else "fp32"] = OrtBackend(
-                    args.model, max_length=max(args.seq_lens), threads=2, quantize=quantize)
-            except Exception as e:
-                print(f"ORT quantize={quantize} unavailable: {e}", flush=True)
 
     vocab = tokenizer.vocab_size
     for T in args.threads:
         torch.set_num_threads(T)
+        if run_ort:
+            for quantize in (False, True):
+                try:
+                    ort["int8" if quantize else "fp32"] = OrtBackend(
+                        args.model, max_length=max(args.seq_lens), threads=T,
+                        quantize=quantize)
+                except Exception as e:
+                    print(f"ORT quantize={quantize} unavailable: {e}", flush=True)
         for L in args.seq_lens:
             for N in args.batch_sizes:
-                rec_base = {"event": "cost_grid", "threads": T, "N": N, "L": L}
+                rec_base = {"event": "cost_grid", "threads": T, "N": N, "L": L,
+                            "torch_num_threads": torch.get_num_threads()}
                 todo_torch = run_torch and any(
                     (T, N, L, k) not in done
-                    for k in ("embed", "layer_block", "compact_half", "exit_head"))
+                    for k in ("embed", "layer", "layer_block", "gather",
+                              "score", "compact_half", "exit_head"))
                 todo_ort = run_ort and any(
                     (T, N, L, f"ort_{t}") not in done for t in ort)
                 if not todo_torch and not todo_ort:
@@ -145,11 +150,28 @@ def main():
                         if (T, N, L, "embed") not in done:
                             r = bench(lambda: ranker.embed(ids, am, tt), args.warmup, reps)
                             log.write({**rec_base, "kind": "embed", **r})
+                        # direct single-layer cost (the honest ledger entry)
+                        if (T, N, L, "layer") not in done:
+                            r = bench(lambda: ranker.forward_layer(hidden, ext_mask, 0),
+                                      args.warmup, reps)
+                            log.write({**rec_base, "kind": "layer", **r})
                         if (T, N, L, "layer_block") not in done:
                             r = bench(lambda: ranker.forward_full(ids, am, tt), args.warmup, reps)
                             log.write({**rec_base, "kind": "layer_block", **r})
 
                         idx = torch.arange(0, N, 2)
+                        # gather/scatter only: index_select + index_copy, no forward
+                        if (T, N, L, "gather") not in done:
+                            def gather_only():
+                                h = hidden.index_select(0, idx)
+                                return hidden.index_copy(0, idx, h)
+                            r = bench(gather_only, args.warmup, reps)
+                            log.write({**rec_base, "kind": "gather", **r})
+                        # pooler + classifier: the real checkpoint/final scoring path
+                        if (T, N, L, "score") not in done:
+                            r = bench(lambda: ranker.score_hidden(hidden), args.warmup, reps)
+                            log.write({**rec_base, "kind": "score", **r})
+
                         def compact():
                             h = hidden.index_select(0, idx)
                             m = ext_mask.index_select(0, idx)
@@ -174,7 +196,8 @@ def main():
                         "token_type_ids": tt.numpy(),
                     }
                     r = bench(lambda: sess.session.run(["logits"], feeds), args.warmup, reps)
-                    log.write({**rec_base, "kind": f"ort_{tag}", **r})
+                    log.write({**rec_base, "kind": f"ort_{tag}", **r,
+                               "session_threads": sess.session.get_session_options().intra_op_num_threads if hasattr(sess.session, 'get_session_options') else T})
                 print(f"T={T} N={N} L={L} done (reps={reps})", flush=True)
 
     print("cost grid complete", flush=True)

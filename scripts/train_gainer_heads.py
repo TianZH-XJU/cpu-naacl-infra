@@ -149,28 +149,39 @@ def rollout_sim(S, valid, r, prio_fn, collect=None):
 
 
 def train_exit_head(X, y, mask, seed):
+    """Train an exit head with a QUERY-LEVEL split (post-review fix).
+
+    The previous version flattened all candidates and split randomly, so
+    candidates from the same query could appear in both train and validation,
+    inflating validation performance (query leakage). Now the split is over
+    queries: validation queries are entirely unseen during training."""
     seed_everything(seed)
     head = MLP(X.shape[-1])
     opt = torch.optim.AdamW(head.parameters(), lr=EXIT_LR, weight_decay=1e-4)
-    idx = torch.nonzero(mask, as_tuple=True)
-    Xf, yf = X[idx].float(), y[idx].float()
     g = torch.Generator().manual_seed(seed)
-    perm = torch.randperm(len(idx[0]), generator=g)
-    n_val = max(1, int(0.1 * len(perm)))
-    val_idx, tr_idx = perm[:n_val], perm[n_val:]
+    n_q = X.shape[0]
+    qperm = torch.randperm(n_q, generator=g)
+    n_val_q = max(1, int(0.1 * n_q))
+    val_q, tr_q = qperm[:n_val_q], qperm[n_val_q:]
+    tr_rows = torch.nonzero(mask[tr_q], as_tuple=True)
+    Xf, yf = X[tr_q][tr_rows].float(), y[tr_q][tr_rows].float()
+    val_rows = torch.nonzero(mask[val_q], as_tuple=True)
+    Xv, yv = X[val_q][val_rows].float(), y[val_q][val_rows].float()
+    if len(Xf) == 0 or len(Xv) == 0:
+        raise RuntimeError("empty train or validation set after query-level split")
     best, best_state, stale = float("inf"), None, 0
     for _ in range(EXIT_EPOCHS):
         head.train()
-        perm_t = torch.randperm(len(tr_idx), generator=g)
+        perm_t = torch.randperm(len(Xf), generator=g)
         for a in range(0, len(perm_t), EXIT_BATCH):
-            b = tr_idx[perm_t[a:a + EXIT_BATCH]]
+            b = perm_t[a:a + EXIT_BATCH]
             loss = F.smooth_l1_loss(head(Xf[b]), yf[b])
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
         head.eval()
         with torch.no_grad():
-            vl = F.smooth_l1_loss(head(Xf[val_idx]), yf[val_idx], reduction="sum").item() / len(val_idx)
+            vl = F.smooth_l1_loss(head(Xv), yv, reduction="sum").item() / len(yv)
         if vl < best - 1e-7:
             best, stale = vl, 0
             best_state = {k: v.clone() for k, v in head.state_dict().items()}

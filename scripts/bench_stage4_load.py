@@ -1,38 +1,36 @@
-"""Stage-4 load experiment: query-local vs cross-query wavefront scheduling.
+"""Stage-4 load experiment v2 (post-review f0873cd4): unified cost ledger,
+closed-loop arrivals, request-level traces, strong baseline.
 
-Tests RQ3 / H3 (plan sections 10.3, 12): does cross-query candidate-layer
-batching improve serving latency on a low-core CPU, and where is the
-tail-latency knee from batching wait?
+Fixes applied from the review:
+- P0-2 unified cost ledger: embed, single-layer forward_layer, score_hidden
+  (pooler+classifier), exit_head (MLP), gather (index_select+index_copy) are
+  measured INDEPENDENTLY in the cost grid; serial and wavefront simulations
+  price every component from the same table. The layer_block/6 derivation is
+  no longer used.
+- P0-3 closed-loop arrivals are completion-driven: a client submits its next
+  query only after its previous one completes (busy flag until notify_done).
+  Submission/completion trajectories are logged.
+- P0-4 unified timing boundary: tokenization and request construction happen
+  ONCE outside every timed region and are reported separately; both real
+  paths are timed on identical pre-built request objects.
+- P0-5 request-level traces: every real request records arrival, submission,
+  first-layer, completion times and a per-layer ledger (rows executed, rows
+  scored, wall ms); real p50/p95/p99 are computed from these raw traces.
+- P1-6 pooler path: the real experiment uses signal="pooler"; the scheduler
+  parity test in scripts/test_wavefront.py now covers it.
+- P1-7 strong baseline: cascade_shallow (TinyBERT-L2 prefilter -> MiniLM-L6)
+  runs on the SAME queries with the same timing boundary.
 
-Method
-1. Calibrate per-checkpoint score thresholds on held-out queries so the keep
-   policy is batch-independent (keep = score >= threshold). This is required
-   for cross-query composition: a top-keep-fraction rule would change its
-   decisions depending on which queries share a batch.
-2. Collect real per-query execution traces (per-layer active counts, exit
-   layers) on load-test queries with a single length bucket (L=256).
-3. Simulate serving under three arrival patterns (burst, staggered, 2-client
-   closed loop) with a measured-cost model built from
-   artifacts/runs/cost_grid.jsonl:
-     - serial query-local execution (FIFO, one query at a time)
-     - cross-query wavefront scheduling
-4. Validate the simulator against real execution (burst arrival): real serial
-   per-query service times and real wavefront makespan.
-
-Cost model (from cost_grid.jsonl, torch FP32):
-  layer1(N, L)  = layer_block(N, L) / 6                (per-layer forward)
-  gather(n, k)  = compact_half(n, L) - layer1(k, L)    (index_select + index_copy)
-  score(N)      ~= exit_head(N)                        (pooler+classifier proxy)
-  embed(N)      = embed(N)
-
-Limitations (documented): single length bucket, torch FP32 path only,
-simulation ignores cache/frequency effects and CPU contention between the
-benchmark process and other load.
+Honest labeling: simulation results are labeled "sim"; real executions are
+labeled "real". The sim is validated against real runs; sim p95/p99 are NOT
+presented as measured serving latency.
 """
 import argparse
 import json
+import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -45,44 +43,56 @@ from cpu_cast.logging_utils import JsonlLogger  # noqa: E402
 from cpu_cast.scheduler import Request, WavefrontScheduler  # noqa: E402
 
 
+def git_sha():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True).strip()[:12]
+    except Exception:
+        return "unknown"
+
+
 # ---------------------------------------------------------------------------
-# Cost table from the measured grid
+# Cost table: direct measurements only (P0-2)
 # ---------------------------------------------------------------------------
 class CostTable:
+    """All entries are direct p50 measurements from cost_grid.jsonl.
+
+    kinds: embed, layer (single forward_layer), gather (index_select +
+    index_copy, no forward), score (pooler + classifier), exit_head (MLP).
+    """
+
     def __init__(self, path, threads=2, seq_len=256):
         rows = []
         with open(path, encoding="utf-8") as f:
             for line in f:
                 r = json.loads(line)
                 if r.get("event") == "cost_grid" and r.get("threads") == threads \
-                        and r.get("L") == seq_len:
+                        and r.get("L") == seq_len and not r["kind"].startswith("ort_"):
                     rows.append(r)
         if not rows:
             raise RuntimeError(f"no cost_grid rows for threads={threads} L={seq_len}")
-        self.layer1 = {}
-        self.compact = {}
-        self.embed = {}
-        self.exit_head = {}
+        self.tables = {"embed": {}, "layer": {}, "gather": {}, "score": {},
+                       "exit_head": {}}
         for r in rows:
-            n = r["N"]
-            if r["kind"] == "layer_block":
-                self.layer1[n] = r["p50_ms"] / 6.0
-            elif r["kind"] == "compact_half":
-                self.compact[n] = r["p50_ms"]
-            elif r["kind"] == "embed":
-                self.embed[n] = r["p50_ms"]
-            elif r["kind"] == "exit_head":
-                self.exit_head[n] = r["p50_ms"]
-        self.ns = sorted(self.layer1)
+            if r["kind"] in self.tables:
+                self.tables[r["kind"]][r["N"]] = r["p50_ms"]
+        self.ns = sorted(self.tables["layer"])
 
-    def _interp(self, table, n):
+    def _interp(self, kind, n):
+        table = self.tables[kind]
         if not table or n <= 0:
             return 0.0
         ns = sorted(table)
         if n <= ns[0]:
             return table[ns[0]]
         if n >= ns[-1]:
-            return table[ns[-1]]
+            # Linear extrapolation beyond the measured edge: the scheduler
+            # chunks merged batches at max_batch=256, so charges can exceed
+            # the largest measured N; clamping there systematically
+            # under-priced wavefront layer events.
+            lo, hi = ns[-2], ns[-1]
+            slope = (table[hi] - table[lo]) / (hi - lo)
+            return table[hi] + slope * (n - hi)
         import bisect
         i = bisect.bisect_left(ns, n)
         lo, hi = ns[i - 1], ns[i]
@@ -92,32 +102,35 @@ class CostTable:
         return table[lo] * (1 - w) + table[hi] * w
 
     def layer_ms(self, n):
-        return self._interp(self.layer1, n)
+        return self._interp("layer", n)
 
     def gather_ms(self, n_from, n_keep):
-        base = self._interp(self.compact, n_from)
-        layer_at_keep = self._interp(self.layer1, n_keep)
-        return max(0.0, base - layer_at_keep)
+        return self._interp("gather", n_from)
 
     def embed_ms(self, n):
-        return self._interp(self.embed, n)
+        return self._interp("embed", n)
 
     def score_ms(self, n):
-        return self._interp(self.exit_head, n)
+        return self._interp("score", n)
+
+    def exit_head_ms(self, n):
+        return self._interp("exit_head", n)
 
 
 # ---------------------------------------------------------------------------
-# Arrival processes
+# Arrival processes (P0-3: closed loop is completion-driven)
 # ---------------------------------------------------------------------------
 class StaticArrivals:
-    def __init__(self, qids, times):
-        self.items = sorted(zip(qids, times), key=lambda x: x[1])
+    def __init__(self, qids, times_ms):
+        self.items = sorted(zip(qids, times_ms), key=lambda x: x[1])
         self.i = 0
+        self.submitted = []
 
     def due(self, clock):
         out = []
-        while self.i < len(self.items) and self.items[self.i][1] <= clock + 1e-12:
+        while self.i < len(self.items) and self.items[self.i][1] <= clock + 1e-9:
             out.append(self.items[self.i])
+            self.submitted.append(self.items[self.i])
             self.i += 1
         return out
 
@@ -129,31 +142,37 @@ class StaticArrivals:
 
 
 class ClosedLoopArrivals:
-    """n_clients closed-loop clients; each submits its next query as soon as
-    its previous one completes (client_free = completion time)."""
+    """n_clients closed-loop clients. A client submits its next query ONLY
+    after its previous one completes: busy[c] is set on submission and
+    cleared in notify_done. All times in ms."""
 
     def __init__(self, qids, n_clients):
-        self.client_q = [[qids[i] for i in range(c, len(qids), n_clients)]
-                         for c in range(n_clients)]
+        self.client_q = [list(qids[c::n_clients]) for c in range(n_clients)]
         self.ptr = [0] * n_clients
         self.client_free = [0.0] * n_clients
+        self.busy = [False] * n_clients
         self.pending = []
+        self.submitted = []   # (qid, submit_ms) trajectory
 
     def due(self, clock):
         out = []
         for c, q_list in enumerate(self.client_q):
-            while self.ptr[c] < len(q_list) and self.client_free[c] <= clock + 1e-12:
+            if self.busy[c]:
+                continue
+            if self.ptr[c] < len(q_list) and self.client_free[c] <= clock + 1e-9:
                 qid = q_list[self.ptr[c]]
                 t = max(self.client_free[c], clock)
                 out.append((qid, t))
                 self.pending.append((qid, t))
+                self.submitted.append((qid, t))
                 self.ptr[c] += 1
+                self.busy[c] = True
         return out
 
     def next_time(self):
         pending_t = min((t for _, t in self.pending), default=None)
         future = [self.client_free[c] for c in range(len(self.client_q))
-                  if self.ptr[c] < len(self.client_q[c])]
+                  if not self.busy[c] and self.ptr[c] < len(self.client_q[c])]
         cand = future + ([pending_t] if pending_t is not None else [])
         return min(cand) if cand else None
 
@@ -162,12 +181,15 @@ class ClosedLoopArrivals:
         for c, q_list in enumerate(self.client_q):
             if qid in q_list:
                 self.client_free[c] = t
+                self.busy[c] = False
 
 
 # ---------------------------------------------------------------------------
 # Requests, traces, calibration
 # ---------------------------------------------------------------------------
 def build_requests(runs, queries, corpus, qids, tokenizer, max_length):
+    """Tokenize ONCE; the returned requests are reused by every policy so all
+    timed regions share the same preprocessing boundary."""
     reqs = []
     for qid in qids:
         doc_ids = sorted(runs[qid].keys())
@@ -175,15 +197,17 @@ def build_requests(runs, queries, corpus, qids, tokenizer, max_length):
                  for d in doc_ids]
         enc = tokenizer(pairs, padding="max_length", truncation=True,
                         max_length=max_length, return_tensors="pt")
-        r = Request(qid, enc["input_ids"], enc["attention_mask"], enc["token_type_ids"])
+        r = Request(qid, enc["input_ids"], enc["attention_mask"],
+                    enc["token_type_ids"])
         r.doc_ids = doc_ids
         reqs.append(r)
     return reqs
 
 
 def collect_trace(ranker, req, checkpoints, thresholds, compact_threshold=0.75):
-    """Run one query with the fixed-threshold keep policy; record the trace
-    used by both the simulator and the real wavefront run."""
+    """Run one query with the fixed-threshold keep policy; record the honest
+    per-layer ledger: exec_rows (rows actually forwarded), scored_rows
+    (rows passed through score_hidden), compaction events."""
     L = ranker.num_layers
     n = req.n
     with torch.inference_mode():
@@ -192,7 +216,7 @@ def collect_trace(ranker, req, checkpoints, thresholds, compact_threshold=0.75):
         done = torch.zeros(n, dtype=torch.bool)
         exit_layer = torch.full((n,), L, dtype=torch.long)
         scores = torch.zeros(n)
-        n_by_layer, compactions = [], []
+        ledger = []   # per layer: dict(layer, exec_rows, scored_rows, compacted)
         for layer in range(L):
             idx = torch.nonzero(~done, as_tuple=True)[0]
             if idx.numel() == 0:
@@ -206,11 +230,11 @@ def collect_trace(ranker, req, checkpoints, thresholds, compact_threshold=0.75):
             else:
                 hidden = ranker.forward_layer(hidden, ext_mask, layer)
                 h = hidden
-            n_by_layer.append(idx.numel())
-            if compacted:
-                compactions.append((layer, n, idx.numel()))
+            entry = {"layer": layer, "exec_rows": int(h.shape[0]),
+                     "scored_rows": 0, "compacted": bool(compacted)}
             if layer in checkpoints:
                 cur_all = ranker.score_hidden(h)
+                entry["scored_rows"] = int(cur_all.shape[0])
                 cur_active = cur_all if compacted else cur_all[idx]
                 keep_active = cur_active >= thresholds[layer]
                 keep = torch.zeros(n, dtype=torch.bool)
@@ -221,13 +245,13 @@ def collect_trace(ranker, req, checkpoints, thresholds, compact_threshold=0.75):
                 exit_layer[finished] = layer + 1
                 scores[finished] = cur_map[finished]
                 done = done | finished
+            ledger.append(entry)
         idx = torch.nonzero(~done, as_tuple=True)[0]
         if idx.numel():
             scores[idx] = ranker.score_hidden(hidden[idx])
             done[idx] = True
     return {
-        "n_by_layer": n_by_layer,
-        "compactions": compactions,
+        "ledger": ledger,
         "exit_layer": exit_layer.tolist(),
         "scores": scores.tolist(),
         "n_final": int((exit_layer == L).sum()),
@@ -236,7 +260,10 @@ def collect_trace(ranker, req, checkpoints, thresholds, compact_threshold=0.75):
 
 def calibrate_thresholds(ranker, calib_reqs, checkpoints, keep_frac):
     """Threshold = (1 - keep_frac)-quantile of checkpoint scores over the
-    calibration queries; batch-independent by construction."""
+    calibration queries; batch-independent by construction. NOTE: the
+    checkpoint-3 distribution is collected over FULL candidate sets, while at
+    serving time checkpoint 3 sees checkpoint-1 survivors; realized keep rates
+    are therefore reported separately (see realized_keep_rates)."""
     L = ranker.num_layers
     vals = {c: [] for c in checkpoints}
     with torch.inference_mode():
@@ -250,24 +277,44 @@ def calibrate_thresholds(ranker, calib_reqs, checkpoints, keep_frac):
     return {c: float(np.quantile(vals[c], 1 - keep_frac)) for c in checkpoints}
 
 
+def realized_keep_rates(traces, checkpoints, L):
+    """Actual keep rate at each checkpoint over the SURVIVOR set (Q7)."""
+    rates = {}
+    for c in checkpoints:
+        reached = 0
+        kept = 0
+        for tr in traces.values():
+            # rows that reached checkpoint c: exited after c (i.e. exit_layer > c)
+            reached += sum(1 for e in tr["exit_layer"] if e > c)
+            # rows kept past checkpoint c: exit_layer > c+1 (rows exiting AT c
+            # have exit_layer == c+1; survivors have exit_layer == L and are
+            # already counted here — do NOT add n_final again)
+            kept += sum(1 for e in tr["exit_layer"] if e > c + 1)
+        rates[c] = {"reached": reached, "kept": kept,
+                    "keep_rate": round(kept / reached, 4) if reached else None}
+    return rates
+
+
 # ---------------------------------------------------------------------------
-# Simulation
+# Simulation (clearly labeled; validated against real runs)
 # ---------------------------------------------------------------------------
 def service_time_serial(tr, cost):
-    n_total = tr["n_by_layer"][0] if tr["n_by_layer"] else 0
+    """Serial query-local service time from the unified ledger."""
+    n_total = tr["ledger"][0]["exec_rows"] if tr["ledger"] else 0
     t = cost.embed_ms(n_total)
-    comp_map = {layer: (nf, nt) for layer, nf, nt in tr["compactions"]}
-    for layer, n_active in enumerate(tr["n_by_layer"]):
-        if layer in comp_map:
-            nf, nt = comp_map[layer]
-            t += cost.gather_ms(nf, nt)
-        t += cost.layer_ms(n_active)
+    for entry in tr["ledger"]:
+        if entry["compacted"]:
+            # gather priced by rows actually gathered (same unit as wavefront)
+            t += cost.gather_ms(entry["exec_rows"], entry["exec_rows"])
+        t += cost.layer_ms(entry["exec_rows"])
+        if entry["scored_rows"]:
+            t += cost.score_ms(entry["scored_rows"])
     t += cost.score_ms(tr["n_final"])
     return t
 
 
 def simulate_serial(traces, arrivals, cost):
-    """Single worker, FIFO queue, one query at a time."""
+    """Single worker, FIFO queue, one query at a time. Times in ms."""
     completions, free = {}, 0.0
     for qid, arr in sorted(arrivals, key=lambda x: x[1]):
         start = max(arr, free)
@@ -276,44 +323,36 @@ def simulate_serial(traces, arrivals, cost):
     return completions
 
 
-def simulate_serial_closed(traces, qids, n_clients, cost):
+def simulate_serial_closed(traces, arrivals, cost):
     """Closed-loop serial: single worker FIFO; clients resubmit on completion."""
-    client_q = [[qids[i] for i in range(c, len(qids), n_clients)]
-                for c in range(n_clients)]
-    ptr = [0] * n_clients
-    client_free = [0.0] * n_clients
-    queue = []
     completions = {}
-    clock = 0.0
     free = 0.0
-    total = len(qids)
-    while len(completions) < total:
-        for c in range(n_clients):
-            while ptr[c] < len(client_q[c]) and client_free[c] <= clock + 1e-12:
-                queue.append((client_q[c][ptr[c]], max(client_free[c], clock)))
-                ptr[c] += 1
+    queue = []
+    total = len(set(q for q, _ in arrivals.submitted)) if arrivals.submitted else None
+    while True:
+        for qid, t in arrivals.due(free):
+            queue.append((qid, t))
         if not queue:
-            pending_clients = [client_free[c] for c in range(n_clients)
-                               if ptr[c] < len(client_q[c])]
-            if not pending_clients:
+            nxt = arrivals.next_time()
+            if nxt is None:
                 break
-            clock = max(clock, min(pending_clients))
+            free = max(free, nxt)
             continue
         queue.sort(key=lambda x: x[1])
         qid, arr = queue.pop(0)
         start = max(arr, free)
         completions[qid] = start + service_time_serial(traces[qid], cost)
         free = completions[qid]
-        clock = free
-        for c in range(n_clients):
-            if qid in client_q[c]:
-                client_free[c] = free
+        arrivals.notify_done(qid, completions[qid])
+        if total is not None and len(completions) >= total:
+            break
     return completions
 
 
 def simulate_wavefront(traces, arrivals, cost, checkpoints, num_layers,
                        max_batch=256):
-    """Event simulation of the wavefront scheduler loop with measured costs."""
+    """Event simulation of the wavefront scheduler loop, priced from the SAME
+    ledger as the serial path. Times in ms."""
     L = num_layers
     state = {}
     completions = {}
@@ -328,7 +367,7 @@ def simulate_wavefront(traces, arrivals, cost, checkpoints, num_layers,
     clock = 0.0
     while True:
         for qid, t in arrivals.due(clock):
-            n = traces[qid]["n_by_layer"][0]
+            n = traces[qid]["ledger"][0]["exec_rows"]
             state[qid] = {"next": [0] * n, "done": [False] * n}
         ready = {}
         for qid, st in state.items():
@@ -347,10 +386,11 @@ def simulate_wavefront(traces, arrivals, cost, checkpoints, num_layers,
         per_req = {}
         for q, _ in rows:
             per_req[q] = per_req.get(q, 0) + 1
+        # same pricing as serial: layer cost + per-request gather
         t = cost.layer_ms(n_batch)
-        if len(per_req) > 1:
-            t += sum(cost.gather_ms(traces[q]["n_by_layer"][0], k)
-                     for q, k in per_req.items())
+        # gather priced by rows actually gathered by each request in this
+        # chunk (NOT the layer-0 exec_rows: later layers see survivors)
+        t += sum(cost.gather_ms(k, k) for q, k in per_req.items())
         clock += t
         by_q = {}
         for q, row in rows:
@@ -380,11 +420,8 @@ def simulate_wavefront(traces, arrivals, cost, checkpoints, num_layers,
     return completions
 
 
-# ---------------------------------------------------------------------------
-# Reporting helpers
-# ---------------------------------------------------------------------------
 def lat_stats(completions, arrivals):
-    """completions and arrival times are in milliseconds (cost-table units)."""
+    """completions and arrival times in ms."""
     lats = [completions[q] - t for q, t in arrivals]
     starts = [t for _, t in arrivals]
     return {
@@ -396,11 +433,48 @@ def lat_stats(completions, arrivals):
     }
 
 
+# ---------------------------------------------------------------------------
+# Real baselines
+# ---------------------------------------------------------------------------
+def run_cascade_shallow(model_path, tinybert_path, reqs, tokenizer,
+                        corpus, queries, keep_top=50, max_length=256):
+    """cascade_shallow: TinyBERT scores all candidates -> keep top-K ->
+    MiniLM-L6 full depth on survivors. Same queries, same timing boundary
+    (tokenization of the full candidate set already done in reqs)."""
+    from transformers import AutoModelForSequenceClassification
+    tiny = AutoModelForSequenceClassification.from_pretrained(tinybert_path).eval()
+    big = ActiveSetRanker(model_path)
+    times, run_out = [], {}
+    with torch.inference_mode():
+        for r in reqs:
+            t0 = time.perf_counter()
+            tscores = tiny(input_ids=r.input_ids, attention_mask=r.attention_mask,
+                           token_type_ids=r.token_type_ids).logits.squeeze(-1)
+            k = min(keep_top, r.n)
+            topk = torch.topk(tscores, k).indices
+            kept_ids = [r.doc_ids[i] for i in topk.tolist()]
+            enc = tokenizer(
+                [(queries[r.qid], corpus[d]["title"] + " " + corpus[d]["text"])
+                 for d in kept_ids],
+                padding=True, truncation=True, max_length=max_length,
+                return_tensors="pt")
+            bscores = big.forward_full(enc["input_ids"], enc["attention_mask"],
+                                       enc["token_type_ids"])
+            dt = (time.perf_counter() - t0) * 1000.0
+            times.append(dt)
+            merged = {did: float(tscores[i]) for i, did in enumerate(r.doc_ids)}
+            for i, did in enumerate(kept_ids):
+                merged[did] = 1e3 + float(bscores[i])
+            run_out[r.qid] = merged
+    return times, run_out
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="scifact")
     parser.add_argument("--run", default="data/candidate_runs/scifact/rrf_top100.jsonl")
     parser.add_argument("--model", default="models/ms-marco-MiniLM-L-6-v2")
+    parser.add_argument("--tinybert", default="models/ms-marco-TinyBERT-L-2-v2")
     parser.add_argument("--cost-grid", default="artifacts/runs/cost_grid.jsonl")
     parser.add_argument("--num-queries", type=int, default=12)
     parser.add_argument("--num-calib", type=int, default=20)
@@ -409,9 +483,11 @@ def main():
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--stagger-ms", type=float, default=250.0)
     parser.add_argument("--stagger-light-ms", type=float, default=2000.0)
+    parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--out", default="artifacts/runs/bench_stage4_load.jsonl")
     args = parser.parse_args()
 
+    run_id = uuid.uuid4().hex[:8]
     torch.set_num_threads(args.threads)
     d = data.load_split(f"data/{args.dataset}")
     d = data.restrict_to_test_queries(d)
@@ -428,109 +504,186 @@ def main():
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     ranker = ActiveSetRanker(args.model)
+    L = ranker.num_layers
     log = JsonlLogger(args.out, run_meta={
-        "stage": "stage4", "dataset": args.dataset, "model": args.model,
+        "stage": "stage4", "version": "v2", "run_id": run_id, "git_sha": git_sha(),
+        "dataset": args.dataset, "model": args.model,
         "num_queries": args.num_queries, "keep_frac": args.keep_frac,
         "max_length": args.max_length, "threads": args.threads,
+        "cli": " ".join(sys.argv[1:]),
     })
 
+    # ---- preprocessing OUTSIDE all timed regions (P0-4) ----
+    t0 = time.perf_counter()
     load_reqs = build_requests(runs, d["queries"], d["corpus"], qids, tokenizer,
                                args.max_length)
     calib_reqs = build_requests(runs, d["queries"], d["corpus"], calib_qids,
                                 tokenizer, args.max_length)
+    tok_s = time.perf_counter() - t0
+    log.write({"event": "preprocessing", "tokenize_build_s": round(tok_s, 3),
+               "num_load": len(load_reqs), "num_calib": len(calib_reqs)})
+    print(f"preprocessing (outside timed regions): {tok_s:.1f}s", flush=True)
 
     checkpoints = (1, 3)
-    L = ranker.num_layers
     t0 = time.perf_counter()
     thresholds = calibrate_thresholds(ranker, calib_reqs, checkpoints, args.keep_frac)
-    print(f"calibrated thresholds: { {k: round(v, 4) for k, v in thresholds.items()} } "
-          f"({time.perf_counter() - t0:.1f}s)", flush=True)
     log.write({"event": "calibration", "thresholds": thresholds,
-               "keep_frac": args.keep_frac, "num_calib": len(calib_qids)})
+               "keep_frac": args.keep_frac, "num_calib": len(calib_qids),
+               "calibration_s": round(time.perf_counter() - t0, 1)})
+    print(f"thresholds: { {k: round(v, 4) for k, v in thresholds.items()} }", flush=True)
 
     t0 = time.perf_counter()
     traces = {}
     for r in load_reqs:
         traces[r.qid] = collect_trace(ranker, r, checkpoints, thresholds)
-    print(f"traces collected ({time.perf_counter() - t0:.1f}s)", flush=True)
+    trace_s = time.perf_counter() - t0
     kept = [sum(1 for e in t["exit_layer"] if e == L) for t in traces.values()]
+    rates = realized_keep_rates(traces, checkpoints, L)
     log.write({"event": "traces", "survivors_per_query": kept,
-               "compactions": {q: t["compactions"] for q, t in traces.items()}})
-    print(f"survivors per query (of 100): {kept}", flush=True)
+               "realized_keep_rates": rates,
+               "ledger": {q: t["ledger"] for q, t in traces.items()}})
+    print(f"traces ({trace_s:.1f}s); survivors/query: {kept}; "
+          f"realized keep rates: { {k: v['keep_rate'] for k, v in rates.items()} }",
+          flush=True)
 
     run_out = {r.qid: {dd: s for dd, s in zip(r.doc_ids, traces[r.qid]["scores"])}
                for r in load_reqs}
     m = metrics.evaluate({q: d["qrels"][q] for q in run_out}, run_out)
-    log.write({"event": "quality", "ndcg_10": round(m["ndcg_cut_10"], 4),
+    policy_ndcg = round(m["ndcg_cut_10"], 4)
+    log.write({"event": "quality", "ndcg_10": policy_ndcg,
                "mrr": round(m["recip_rank"], 4)})
-    print(f"policy quality: nDCG@10={m['ndcg_cut_10']:.4f} MRR={m['recip_rank']:.4f}",
-          flush=True)
+    print(f"active-set policy quality: nDCG@10={policy_ndcg}", flush=True)
 
     cost = CostTable(args.cost_grid, threads=args.threads, seq_len=args.max_length)
-    print(f"cost table: layer1(100)={cost.layer_ms(100):.2f}ms "
-          f"layer1(32)={cost.layer_ms(32):.2f}ms "
-          f"gather(100,50)={cost.gather_ms(100, 50):.2f}ms", flush=True)
+    log.write({"event": "cost_table", "layer100_ms": round(cost.layer_ms(100), 2),
+               "layer32_ms": round(cost.layer_ms(32), 2),
+               "gather100_ms": round(cost.gather_ms(100, 50), 2),
+               "score100_ms": round(cost.score_ms(100), 3),
+               "embed100_ms": round(cost.embed_ms(100), 2)})
+    print(f"ledger: layer(100)={cost.layer_ms(100):.2f}ms "
+          f"gather(100)={cost.gather_ms(100, 50):.2f}ms "
+          f"score(100)={cost.score_ms(100):.3f}ms", flush=True)
 
-    results = {}
+    # ---- simulation (labeled sim; validated below) ----
     burst = [(q, 0.0) for q in qids]
     stag = [(q, i * args.stagger_ms) for i, q in enumerate(qids)]
     stag_light = [(q, i * args.stagger_light_ms) for i, q in enumerate(qids)]
-
     for name, arr in [("burst", burst), ("staggered", stag),
                       ("staggered_light", stag_light)]:
         comps = simulate_serial(traces, arr, cost)
-        results[("serial", name)] = lat_stats(comps, arr)
-        log.write({"event": "sim_serving", "mode": "serial", "arrival": name,
-                   **results[("serial", name)]})
+        log.write({"event": "sim", "mode": "serial", "arrival": name,
+                   **lat_stats(comps, arr)})
         comps = simulate_wavefront(traces, StaticArrivals(qids, [t for _, t in arr]),
                                    cost, checkpoints, L)
-        results[("wavefront", name)] = lat_stats(comps, arr)
-        log.write({"event": "sim_serving", "mode": "wavefront", "arrival": name,
-                   **results[("wavefront", name)]})
+        log.write({"event": "sim", "mode": "wavefront", "arrival": name,
+                   **lat_stats(comps, arr)})
+    cl = ClosedLoopArrivals(qids, 2)
+    comps = simulate_serial_closed(traces, cl, cost)
+    log.write({"event": "sim", "mode": "serial", "arrival": "closed2",
+               **lat_stats(comps, cl.submitted),
+               "submit_trajectory": cl.submitted})
+    cl = ClosedLoopArrivals(qids, 2)
+    comps = simulate_wavefront(traces, cl, cost, checkpoints, L)
+    log.write({"event": "sim", "mode": "wavefront", "arrival": "closed2",
+               **lat_stats(comps, cl.submitted),
+               "submit_trajectory": cl.submitted})
+    print("sim done (see jsonl for stats)", flush=True)
 
-    comps = simulate_serial_closed(traces, qids, 2, cost)
-    results[("serial", "closed2")] = lat_stats(comps, [(q, 0.0) for q in comps])
-    log.write({"event": "sim_serving", "mode": "serial", "arrival": "closed2",
-               **results[("serial", "closed2")]})
-    comps = simulate_wavefront(traces, ClosedLoopArrivals(qids, 2), cost,
-                               checkpoints, L)
-    results[("wavefront", "closed2")] = lat_stats(comps, [(q, 0.0) for q in comps])
-    log.write({"event": "sim_serving", "mode": "wavefront", "arrival": "closed2",
-               **results[("wavefront", "closed2")]})
+    # ---- real validation, unified boundary (P0-4/P0-5) ----
+    for rep in range(args.reps):
+        t0 = time.perf_counter()
+        for r in load_reqs:
+            collect_trace(ranker, r, checkpoints, thresholds)
+        real_serial_s = time.perf_counter() - t0
+        log.write({"event": "real_serial", "rep": rep,
+                   "total_s": round(real_serial_s, 3),
+                   "sim_total_s": round(
+                       sum(service_time_serial(traces[q], cost) for q in qids) / 1000, 3)})
 
-    for key, v in sorted(results.items()):
-        print(f"sim {key[0]:>9} {key[1]:>10}: p50={v['p50_ms']:>8.1f} "
-              f"p95={v['p95_ms']:>8.1f} p99={v['p99_ms']:>8.1f} "
-              f"makespan={v['makespan_ms']:>8.1f}", flush=True)
+    # real wavefront, offline batch, request-level traces
+    for rep in range(args.reps):
+        t0 = time.perf_counter()
+        sched = WavefrontScheduler(ranker, checkpoints=checkpoints, signal="pooler",
+                                   keep_fn=lambda s, layer: s >= thresholds[layer])
+        sched.run(load_reqs)
+        total_s = time.perf_counter() - t0
+        lats = [(r.finish_time - t0) * 1000 for r in load_reqs]
+        log.write({"event": "real_wavefront_offline", "rep": rep,
+                   "total_s": round(total_s, 3),
+                   "p50_ms": round(float(np.percentile(lats, 50)), 1),
+                   "p95_ms": round(float(np.percentile(lats, 95)), 1),
+                   "p99_ms": round(float(np.percentile(lats, 99)), 1),
+                   "layer_events": sched.layer_events})
+        print(f"real offline wavefront rep{rep}: p50={np.percentile(lats, 50):.0f}ms "
+              f"p95={np.percentile(lats, 95):.0f}ms", flush=True)
 
-    # ---- real-execution validation (burst arrival) ----
+    # real wavefront, ONLINE staggered arrivals -> true request-level latency
+    for rep in range(args.reps):
+        online_reqs = build_requests(runs, d["queries"], d["corpus"], qids,
+                                     tokenizer, args.max_length)
+        for i, r in enumerate(online_reqs):
+            r.arrival = i * args.stagger_light_ms / 1000.0
+        sched = WavefrontScheduler(ranker, checkpoints=checkpoints, signal="pooler",
+                                   keep_fn=lambda s, layer: s >= thresholds[layer])
+        t0 = time.perf_counter()
+        sched.run(online_reqs, online=True)
+        total_s = time.perf_counter() - t0
+        lats = [(r.finish_time - t0) * 1000 - r.arrival * 1000 for r in online_reqs]
+        req_trace = [{"qid": r.qid, "arrival_ms": r.arrival * 1000,
+                      "submit_ms": round((r.submit_time or 0) * 1000, 1),
+                      "first_layer_ms": round(((r.first_exec_time or 0) - t0) * 1000, 1),
+                      "finish_ms": round(((r.finish_time or 0) - t0) * 1000, 1),
+                      "latency_ms": round(float(lats[i]), 1),
+                      "layer_log": r.layer_log}
+                     for i, r in enumerate(online_reqs)]
+        log.write({"event": "real_wavefront_online", "rep": rep,
+                   "stagger_ms": args.stagger_light_ms,
+                   "total_s": round(total_s, 3),
+                   "p50_ms": round(float(np.percentile(lats, 50)), 1),
+                   "p95_ms": round(float(np.percentile(lats, 95)), 1),
+                   "p99_ms": round(float(np.percentile(lats, 99)), 1),
+                   "requests": req_trace})
+        print(f"real online wavefront rep{rep}: p50={np.percentile(lats, 50):.0f}ms "
+              f"p95={np.percentile(lats, 95):.0f}ms p99={np.percentile(lats, 99):.0f}ms",
+              flush=True)
+
+    # real serial reference under the same staggered arrival (FIFO single worker)
+    for rep in range(args.reps):
+        services = []
+        for r in load_reqs:
+            t1 = time.perf_counter()
+            collect_trace(ranker, r, checkpoints, thresholds)
+            services.append((time.perf_counter() - t1) * 1000.0)
+        arr = [i * args.stagger_light_ms for i in range(len(load_reqs))]
+        lats, free = [], 0.0
+        for i, s in enumerate(services):
+            start = max(arr[i], free)
+            lat = start + s - arr[i]
+            lats.append(lat)
+            free = start + s
+        log.write({"event": "real_serial_online", "rep": rep,
+                   "stagger_ms": args.stagger_light_ms,
+                   "p50_ms": round(float(np.percentile(lats, 50)), 1),
+                   "p95_ms": round(float(np.percentile(lats, 95)), 1),
+                   "p99_ms": round(float(np.percentile(lats, 99)), 1)})
+
+    # ---- strong baseline: cascade_shallow on the same queries (P1-7) ----
     t0 = time.perf_counter()
-    for r in load_reqs:
-        collect_trace(ranker, r, checkpoints, thresholds)
-    real_serial_total = time.perf_counter() - t0
-    sim_serial_total = sum(service_time_serial(traces[q], cost) for q in qids) / 1000.0
-    log.write({"event": "validation_serial", "real_total_s": round(real_serial_total, 3),
-               "sim_total_s": round(sim_serial_total, 3),
-               "ratio": round(sim_serial_total / real_serial_total, 3)})
-    print(f"validation serial: real={real_serial_total:.2f}s "
-          f"sim={sim_serial_total:.2f}s (ratio {sim_serial_total / real_serial_total:.2f})",
-          flush=True)
+    cas_times, cas_run = run_cascade_shallow(
+        args.model, args.tinybert, load_reqs, tokenizer, d["corpus"], d["queries"],
+        keep_top=50, max_length=args.max_length)
+    cas_total = time.perf_counter() - t0
+    cas_m = metrics.evaluate({q: d["qrels"][q] for q in cas_run}, cas_run)
+    log.write({"event": "baseline_cascade_shallow", "keep_top": 50,
+               "ndcg_10": round(cas_m["ndcg_cut_10"], 4),
+               "mrr": round(cas_m["recip_rank"], 4),
+               "total_s": round(cas_total, 3),
+               "p50_ms": round(float(np.percentile(cas_times, 50)), 1),
+               "p95_ms": round(float(np.percentile(cas_times, 95)), 1)})
+    print(f"cascade_shallow: nDCG@10={cas_m['ndcg_cut_10']:.4f} "
+          f"total={cas_total:.2f}s p50={np.percentile(cas_times, 50):.0f}ms", flush=True)
 
-    t0 = time.perf_counter()
-    sched = WavefrontScheduler(ranker, checkpoints=checkpoints, signal="pooler",
-                               keep_fn=lambda s, layer: s >= thresholds[layer])
-    sched.run(build_requests(runs, d["queries"], d["corpus"], qids, tokenizer,
-                             args.max_length))
-    real_wf_total = time.perf_counter() - t0
-    sim_wf_ms = results[("wavefront", "burst")]["makespan_ms"]
-    log.write({"event": "validation_wavefront", "real_total_s": round(real_wf_total, 3),
-               "sim_makespan_s": round(sim_wf_ms / 1000, 3),
-               "layer_events": sched.layer_events})
-    print(f"validation wavefront: real={real_wf_total:.2f}s "
-          f"sim_makespan={sim_wf_ms / 1000:.2f}s", flush=True)
-    print(f"wavefront layer events (layer, rows, requests): {sched.layer_events}",
-          flush=True)
-    print("stage-4 load experiment complete", flush=True)
+    print("stage-4 load experiment v2 complete", flush=True)
 
 
 if __name__ == "__main__":
