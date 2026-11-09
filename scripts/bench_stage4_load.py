@@ -582,7 +582,7 @@ def main():
     ranker = ActiveSetRanker(args.model)
     L = ranker.num_layers
     log = JsonlLogger(args.out, run_meta={
-        "stage": "stage4", "version": "v4", "run_id": run_id,
+        "stage": "stage4", "version": "v5", "run_id": run_id,
         **git_state(),
         "dataset": args.dataset, "model": args.model,
         "num_queries": args.num_queries, "keep_frac": args.keep_frac,
