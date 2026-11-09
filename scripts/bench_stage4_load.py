@@ -26,6 +26,8 @@ labeled "real". The sim is validated against real runs; sim p95/p99 are NOT
 presented as measured serving latency.
 """
 import argparse
+import ctypes
+import gc
 import hashlib
 import json
 import subprocess
@@ -43,6 +45,21 @@ from cpu_cast.active_set import ActiveSetRanker  # noqa: E402
 from cpu_cast.logging_utils import JsonlLogger  # noqa: E402
 from cpu_cast.scheduler import (Request, SerialScheduler,  # noqa: E402
                                 WavefrontScheduler)
+
+
+def trim_memory():
+    """Release freed heap back to the OS between benchmark phases.
+
+    The cgroup memory limit (~3.95 GiB) is tight; glibc malloc does not
+    return freed arenas promptly, so a long multi-phase run accumulates RSS
+    until the serial-online phase OOM-kills (observed on the first v4 run).
+    """
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except OSError:
+        pass
 
 
 def git_sha():
@@ -648,6 +665,7 @@ def main():
                **lat_stats(comps, cl.submitted),
                "submit_trajectory": cl.submitted})
     print("sim done (see jsonl for stats)", flush=True)
+    trim_memory()
 
     # ---- real validation, unified boundary (P0-4/P0-5) ----
     for rep in range(args.reps):
@@ -659,6 +677,7 @@ def main():
                    "total_s": round(real_serial_s, 3),
                    "sim_total_s": round(
                        sum(service_time_serial(traces[q], cost) for q in qids) / 1000, 3)})
+        trim_memory()
 
     # real wavefront, offline batch, request-level traces
     for rep in range(args.reps):
@@ -676,6 +695,8 @@ def main():
                    "layer_events": sched.layer_events})
         print(f"real offline wavefront rep{rep}: p50={np.percentile(lats, 50):.0f}ms "
               f"p95={np.percentile(lats, 95):.0f}ms", flush=True)
+        del sched
+        trim_memory()
 
     # real wavefront, ONLINE staggered arrivals -> true request-level latency
     # (same deterministic arrival trace as the serial online scheduler below)
@@ -692,9 +713,9 @@ def main():
         total_s = time.perf_counter() - t0
         lats = [(r.finish_time - t0) * 1000 - r.arrival * 1000 for r in online_reqs]
         req_trace = [{"qid": r.qid, "arrival_ms": r.arrival * 1000,
-                      "submit_ms": round((r.submit_time or 0) * 1000, 1),
-                      "first_layer_ms": round(((r.first_exec_time or 0) - t0) * 1000, 1),
-                      "finish_ms": round(((r.finish_time or 0) - t0) * 1000, 1),
+                      "submit_ms": round(((r.submit_time or t0) - t0) * 1000, 1),
+                      "first_layer_ms": round(((r.first_exec_time or t0) - t0) * 1000, 1),
+                      "finish_ms": round(((r.finish_time or t0) - t0) * 1000, 1),
                       "latency_ms": round(float(lats[i]), 1),
                       "embed_ms": round(getattr(r, "embed_ms", 0.0) or 0.0, 3),
                       "layer_log": r.layer_log}
@@ -711,6 +732,8 @@ def main():
         print(f"real online wavefront rep{rep}: p50={np.percentile(lats, 50):.0f}ms "
               f"p95={np.percentile(lats, 95):.0f}ms p99={np.percentile(lats, 99):.0f}ms",
               flush=True)
+        del sched, online_reqs, req_trace
+        trim_memory()
 
     # real serial ONLINE scheduler on the SAME arrival trace (review 2 P0-2):
     # a real one-worker FIFO loop that sleeps until each arrival and executes
@@ -730,9 +753,9 @@ def main():
         lats = [(r.finish_time - t0) * 1000 - r.arrival * 1000
                 for r in online_reqs_s]
         req_trace = [{"qid": r.qid, "arrival_ms": r.arrival * 1000,
-                      "submit_ms": round((r.submit_time or 0) * 1000, 1),
-                      "first_exec_ms": round(((r.first_exec_time or 0) - t0) * 1000, 1),
-                      "finish_ms": round(((r.finish_time or 0) - t0) * 1000, 1),
+                      "submit_ms": round(((r.submit_time or t0) - t0) * 1000, 1),
+                      "first_exec_ms": round(((r.first_exec_time or t0) - t0) * 1000, 1),
+                      "finish_ms": round(((r.finish_time or t0) - t0) * 1000, 1),
                       "latency_ms": round(float(lats[i]), 1),
                       "layer_log": r.layer_log}
                      for i, r in enumerate(online_reqs_s)]
@@ -747,6 +770,8 @@ def main():
         print(f"real online serial rep{rep}: p50={np.percentile(lats, 50):.0f}ms "
               f"p95={np.percentile(lats, 95):.0f}ms p99={np.percentile(lats, 99):.0f}ms",
               flush=True)
+        del ssched, online_reqs_s, req_trace
+        trim_memory()
 
     # ---- strong baseline: cascade_shallow on the same queries (P1-7) ----
     t0 = time.perf_counter()

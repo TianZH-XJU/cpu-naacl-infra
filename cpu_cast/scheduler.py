@@ -55,9 +55,12 @@ class Request:
         self.token_type_ids = token_type_ids
         self.n = input_ids.shape[0]
         self.arrival = float(arrival)   # seconds offset from run start
-        self.submit_time = None         # run clock when activated
-        self.first_exec_time = None     # run clock of first execution
-        self.finish_time = None         # run clock when last row completed
+        # All three timing fields are ABSOLUTE time.perf_counter() values;
+        # the caller converts to run-relative ms by subtracting its own t0
+        # (single convention across WavefrontScheduler and SerialScheduler).
+        self.submit_time = None         # wall clock when activated
+        self.first_exec_time = None     # wall clock of first execution
+        self.finish_time = None         # wall clock when last row completed
         self.layer_log = []             # structured per-layer entries (see run())
         self.done = None
         self.next_layer = None
@@ -130,8 +133,8 @@ class WavefrontScheduler:
                     for r in newly:
                         t_e0 = time.perf_counter()
                         self._embed([r])
-                        r.submit_time = now
-                        r.first_exec_time = now
+                        r.submit_time = time.perf_counter()
+                        r.first_exec_time = time.perf_counter()
                         r.embed_ms = (time.perf_counter() - t_e0) * 1000.0
                         active.append(r)
                     pending = [r for r in pending if r.arrival > now]
@@ -156,7 +159,7 @@ class WavefrontScheduler:
                 for r, row in rows:
                     by_req.setdefault(r.qid, (r, []))[1].append(row)
                 event_id = len(self.layer_events)
-                event_start_clock = time.perf_counter() - t0
+                event_start_clock = time.perf_counter()
 
                 # -- gather (per request, timed) --
                 t_g0 = time.perf_counter()
@@ -306,12 +309,11 @@ class SerialScheduler:
         results = {}
         with torch.inference_mode():
             for r in pending:
-                now = time.perf_counter() - t0
-                if online and r.arrival > now:
-                    time.sleep(r.arrival - now)
-                    now = r.arrival
-                r.submit_time = now
-                r.first_exec_time = now
+                now_rel = time.perf_counter() - t0
+                if online and r.arrival > now_rel:
+                    time.sleep(r.arrival - now_rel)
+                r.submit_time = time.perf_counter()
+                r.first_exec_time = r.submit_time
                 t_e0 = time.perf_counter()
                 r.hidden, r.ext_mask = self.ranker.embed(
                     r.input_ids, r.attention_mask, r.token_type_ids)
@@ -407,6 +409,6 @@ class SerialScheduler:
                     self.layer_events.append({**entry,
                                               "request_ids": [r.qid],
                                               "request_rows": {r.qid: int(idx.numel())}})
-                r.finish_time = time.perf_counter() - t0
+                r.finish_time = time.perf_counter()
                 results[r.qid] = r.scores.clone()
         return results
