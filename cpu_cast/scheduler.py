@@ -27,6 +27,11 @@ Correctness invariants (tested in scripts/test_wavefront.py):
 - full-depth wavefront == per-query active-set execution (same policy)
 - pooler-path wavefront == per-query active-set execution (same policy)
 - batch overflow: no lost rows, no double execution, next_layer consistent
+- SerialScheduler (scripts/test_serial_scheduler.py): full-depth output ==
+  forward_full; fixed-threshold path == per-query active-set reference on
+  BOTH the compacted and non-compacted paths, including non-contiguous
+  active rows and no-survivor / all-survivor / single-candidate edges;
+  Serial and Wavefront agree per candidate under the same policy
 """
 import time
 
@@ -342,6 +347,13 @@ class SerialScheduler:
                     t_f0 = time.perf_counter()
                     h = self.ranker.forward_layer(h, m, layer)
                     forward_ms = (time.perf_counter() - t_f0) * 1000.0
+                    # write the forward output back into the request's hidden
+                    # state (regression guard: without this every layer would
+                    # re-execute on the raw embeddings)
+                    if compacted:
+                        r.hidden = r.hidden.index_copy(0, idx, h)
+                    else:
+                        r.hidden = h
                     # -- checkpoint scoring (= scatter) --
                     scored_rows = 0
                     t_s0 = time.perf_counter()
@@ -351,14 +363,16 @@ class SerialScheduler:
                         scored_rows = int(h.shape[0])
                         # when not compacted, h covers all n rows but only the
                         # active positions are decided — select them explicitly
-                        # (same misindexing class as the round-1 eh[~kl] bug)
+                        # and keep the finished mask in the SAME index space as
+                        # the scores it is applied to (active-local, not full-n:
+                        # cur[finished] would misindex on the non-compacted path)
                         cur_active = cur if compacted else cur[idx]
                         keep_active = cur_active >= self.thresholds[layer]
                         keep = torch.zeros(r.n, dtype=torch.bool)
                         keep[idx] = keep_active
                         finished = ~keep_active
                         r.exit_layer[idx[finished]] = layer + 1
-                        r.scores[idx[finished]] = cur[finished]
+                        r.scores[idx[finished]] = cur_active[finished]
                         r.done[idx[finished]] = True
                     scatter_ms = (time.perf_counter() - t_s0) * 1000.0
                     event_id = len(self.layer_events)
