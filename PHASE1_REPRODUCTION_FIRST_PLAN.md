@@ -1,9 +1,18 @@
 # CPU-CAST Phase I：基线复现、Benchmark 运行与严格证据审计计划
 
 > **状态：强制前置阶段（Blocking Gate）**  
-> **版本日期：2026-11-09**  
-> **基线代码起点：CPU-CAST `f2ab2fe84ac79ebeea45c4d8099d24f6d637795c`**  
+> **版本日期：2026-11-09（rev.2：纳入 Stage 4 v5 结果与资源矩阵修订）**  
 > **研究纪律：Phase I 未通过验收，不进入新算法/控制器研发，不对外声称 CPU-CAST 已优于现有方法。**
+>
+> **代码基线快照（三个 SHA 各有用途，禁止混用）：**
+>
+> | 用途 | SHA |
+> |---|---|
+> | Phase I 当前代码基线快照（含 v5 报告与运行数据） | `8d45d280a461eb37fcc560c5e7d68254e43a2e5b` |
+> | Stage 4 v5 实验实际执行代码（v5 JSONL `git_sha` 字段） | `549fa7d8e782aaf6d5ce90fa5f53da1d89b22b48` |
+> | 本 PR 创建时的旧 base（历史参照，不再作为起点） | `f2ab2fe84ac79ebeea45c4d8099d24f6d637795c` |
+>
+> 后续所有正式运行记录必须使用完整 40 位 commit SHA；`version` 标签与短 SHA 仅作辅助。
 
 ---
 
@@ -21,7 +30,17 @@ CPU-CAST 当前最缺少的不是更多模型、更多 scheduler 功能或新的
 
 ### 0.1 为什么 Phase I 必须先做
 
-当前 CPU-CAST 已有一个重要负面结果：Stage 4 报告中，active-set 固定阈值策略的 nDCG@10 明显低于 `cascade_shallow`；wavefront 的 p50 只有很小改善，p95/p99 却明显恶化。这个结论不能靠改名、加一个风险校准层或扩大 scheduler 功能来掩盖。
+Stage 4 v5（`infra/results/stage4_v5_report.md`，执行代码 `549fa7d8e782`）撤回了 v3 基于离线服务时间重放（measured_service_replay）得到的 wavefront 尾延迟恶化结论：那是重放模型的伪影，不是真实系统的行为。在 SciFact 的 30 请求、2 秒间隔负载剖面下，真实 wavefront 调度器相对真实 FIFO `SerialScheduler` 的 p50、p95、p99 三个分位点均更低（p50 约 −89%，p95/p99 约 −80%）。
+
+但该结论必须连同其限制一起引用：
+
+1. 实验只报告了 p50/p95/p99 三个分位点，不得写成"全分位胜出"；
+2. 每次仅 30 个请求，单次 p99 接近样本最大值，三次重复未构成有说服力的置信区间——不满足本计划第 5.4 节"每负载点至少 10,000 次真实请求完成"的尾延迟证据标准；
+3. 单数据集、单到达率、30 请求，不能据此宣称 H3（或任何调度优势）已被普遍验证。
+
+当前更明确、且有同条件证据的未决问题是**策略质量缺口**：在同一批 30 个查询、同一候选集、同一计时边界上，active-set 固定阈值策略的 nDCG@10 为 0.3702，低于 `cascade_shallow` 的 0.6805。这仍是小规模 SciFact 样本上的结论，不应写成跨数据集的总体定论。
+
+因此 Phase I 的首要任务是：验证并解释策略质量缺口及其成因，同时保留对调度收益的独立验证（扩大负载、多到达率、多长度桶后重新确认）。这个结论不能靠改名、加一个风险校准层或扩大 scheduler 功能来掩盖。
 
 同时，相关方法已经有公开实现或可取得的 artifact：
 
@@ -52,6 +71,18 @@ CPU-CAST 当前最缺少的不是更多模型、更多 scheduler 功能或新的
 | R3 — Harmonized comparison | 所有方法使用相同 query IDs、qrels、候选池、计时边界、硬件和统计协议比较 | 这是 CPU-CAST 论文比较所必需的状态 |
 
 **R1 与 R2 是两项不同任务。** 旧代码可以在原始环境复现成功，但无法在现代 CPU/PyTorch 环境直接运行；此时可以 R1 完成、R2 部分完成，不能用 R2 改写 R1 的复现结论。反过来，现代重写代码在 CPU 上跑通，也不等于原论文已复现。
+
+**子状态标签（防止"部分证据被写成完整复现"）：** 每个 baseline 在 manifest 中必须使用以下精确状态之一，禁止把 checkpoint-only 或环境阻塞写成 R1-complete：
+
+| 子状态 | 含义 |
+|---|---|
+| `R1-complete` | 原文数据/模型/脚本/指标下论文主结果已重建 |
+| `R1-partial-checkpoint-only` | 仅用官方 checkpoint 完成 inference 复现；训练/完整协议未复现（如无 GPU 时的 Shallow CE gBCE） |
+| `R1-blocked-environment` | 原文环境无法构建（如 MonoBERT 的 Python 3.7.7/PyTorch 1.3.1/CUDA 10.1）；失败原因已记录 |
+| `R1-blocked-resource` | 原文硬件不可得（如 PRISM 的 Apple M2 / RTX 5070） |
+| `R2-complete` / `R3-complete` | 对应端口/同条件比较已完成 |
+
+注意：CPU 上"能否训练"取决于训练量与时间预算，不是数学上的不可能——资源受限必须按实测 dry-run 工时判定，而不是预先断言。
 
 ### 1.2 Baseline 优先级
 
@@ -266,6 +297,17 @@ CPU-CAST 当前最缺少的不是更多模型、更多 scheduler 功能或新的
 
 **公平比较注意：** PRISM 核心目标是 Top-K selection/precision，不等价于全列表排序指标。至少报告 Precision@K、Recall@K、Top-K set overlap、nDCG@10、full ranking correlation、实际计算量和延迟。任何只保留 Top-K、没有给出其余候选次序的结果，不应冒充完整 reranker 排名结果。
 
+**R1/R2 资源边界（逐项判定，禁止混同）：** PRISM 原文硬件为 Apple M2 与 RTX 5070，本沙箱为 4 vCPU / 3.95 GiB cgroup。逐项状态如下：
+
+| 实验 | 状态 | 依据 |
+|---|---|---|
+| 原始硬件复现（M2 / RTX 5070） | `R1-blocked-resource`（partial） | 硬件不可得；已按计划失败分类记录 |
+| 本沙箱 0.6B reranker 实验 | `R2 = 可尝试` | 官方 Qwen3-Reranker-0.6B 为 BF16，权重约 1.19 GiB；转 FP32 约 2.22 GiB，在 3.95 GiB cgroup 内紧张但**不预先判死**——需计入激活、KV/cache、batch 与运行时开销后实测 |
+| 8B 全量常驻加载 | `RESOURCE-blocked` | 官方 BF16 权重 5 个分片合计约 16.38 GB，远超内存上限 |
+| 8B 流式/分层 CPU port | 单独评估 | PRISM 的 layer streaming 与 chunked execution 正是为降低峰值内存设计；不能仅凭权重总大小断言任何实现都绝对不可行 |
+
+禁止事项：不把量化 checkpoint 或改变模型结构的结果冒充原论文模型复现；沙箱上的 0.6B 实验是 R2 port 或资源受限的 artifact 检查，**不是原硬件的 paper-faithful reproduction**。
+
 ### 3.7 B07 — MICE（EMNLP 2026）
 
 **官方入口：**
@@ -294,6 +336,13 @@ MICE 是通过 bottom contextualization 和 top interaction 分离来减少 cros
 - Pyserini 用于可复现 BM25 / first-stage retrieval；需单独安装 Java 21 或对应官方版本，并固定 Anserini/Lucene。
 - BEIR 用于标准 dataset loading 和 retrieval metrics；必须使用固定 commit/package，核对它对 query、qrels、missing documents 和 ties 的处理。
 - Fast-PLAID 仅在 MICE-P/late-interaction retrieval 任务内作为索引和检索执行层；若只跑 cross-encoder reranking，不应把它加入所有 baseline 环境。
+
+**Pyserini/Java 资源协议（本沙箱实测：无 java、无 sudo、no new privileges）：**
+
+1. **首选路径**：用户目录下安装 Temurin/OpenJDK 21 tarball（无需系统 root），设置 `JAVA_HOME` 与 `PATH`；记录 JDK 发行版、版本、下载 URL 与安装包 SHA-256。Pyserini 官方当前说明以 Java 21 + Python 3.12 为基础；本沙箱 Python 为 3.12.15，Python 侧兼容，但安装后必须实测 `pyserini` import 与 Lucene 检索可运行。
+2. **注意**：Pyserini 的 BM25 检索通过 Lucene/JVM 执行——装不装 Java 影响的是**所有** Pyserini 检索路径（包括用 prebuilt index 检索），不只是本地建索引。MS MARCO prebuilt index 只解决 MS MARCO Passage 的索引构建成本，**对 SciFact/NFCorpus 的候选生成没有替代作用**。
+3. **降级路径（仅当 Java 确实无法安装）**：冻结已有的 SciFact/NFCorpus BM25 run，或用独立 Python BM25 实现（如 `rank_bm25`）生成 R2 候选池；后者必须明确标记为替代实现（`bm25-python-substitute`），不得称为 Pyserini 官方复现，且需报告与已知官方 run 的差异。
+4. 无论哪条路径，BM25 参数（k1/b/analyzer/tokenizer）与 index/run 来源都必须写入 manifest。
 
 ---
 
@@ -728,19 +777,26 @@ python reproduction/harness/compare_outputs.py --reference ... --candidate ...
 
 **任务：**
 
-1. 从干净 checkout 的 `f2ab2fe` 开始。
+1. 从干净 checkout 的 `8d45d280a461eb37fcc560c5e7d68254e43a2e5b`（当前代码基线快照，见文首 SHA 表）开始；v5 实验实际执行代码为 `549fa7d8e782aaf6d5ce90fa5f53da1d89b22b48`；`f2ab2fe84ac79ebeea45c4d8099d24f6d637795c` 仅为历史参照（PR 创建时的旧 base），不再作为起点。
 2. 建立 baseline inventory：官方 repo / DOI / paper status / data / models / metric / original device / artifact access。
 3. 修正 baseline clone 脚本，加入 shallow-cross-encoders；对 PRISM 添加官方 artifact 下载及 hash 流程。
 4. 固定 repo commit、HF model revisions、dataset revisions、environment lock。
 5. 对当前所有旧 run 做 provenance audit：无法恢复确切 code SHA / model revision / dataset hash 的记录列为 legacy / non-authoritative。
 6. 生成一份 baseline priority matrix 和缺失资源矩阵（GPU、Java、内存、Apple M2/RTX 5070 等）。
 
-**交付：**
-- `manifests/baselines.yaml`
-- `manifests/models.json`
-- `manifests/datasets.json`
-- `manifests/environments.json`
-- `reports/discrepancy_log.md`
+**交付：**（统一使用现有 manifest 体系，不新建平行文件，避免双重事实来源）
+
+- `manifests/baselines_manifest.json`：由现有 `manifests/baselines_manifest.txt` 迁移并结构化（不另建 `baselines.yaml`）。
+- `manifests/models_manifest.json`：直接扩展现有文件（HF immutable commit SHA + 每文件 SHA-256 已在当前 tip 落地；注意 `f2ab2fe` 旧 base 中尚无这些字段）（不另建 `models.json`）。
+- `manifests/datasets_manifest.json`：直接扩展现有文件（qrels SHA-256、candidate run hash；补齐 nfcorpus train.tsv 哈希）（不另建 `datasets.json`）。
+- `manifests/environments.json`：新增（Python/依赖锁、CPU/cgroup 配置、JDK 来源与哈希）。
+- `infra/results/discrepancy_log.md`：唯一差异登记处（原始 trace 继续放在 `artifacts/runs/`；不新建根目录 `reports/`）。
+
+**初始 discrepancy log 条目（Phase I-0 时必须登记）：**
+
+1. v5 运行记录（`artifacts/runs/bench_stage4_load_v5.jsonl`）的 `version` 字段写作 `v4`：脚本版本常量未随代码更新同步；结果以 `git_sha=549fa7d8e782aaf6d5ce90fa5f53da1d89b22b48` 追溯，不因 version 标签作废。
+2. v4 的中断运行（`v4_partial_crashed.jsonl`、`v4_partial_oom.jsonl`：meta 解包崩溃、scatter-back 缺失、OOM kill、负延迟计时约定错误）已废弃，标记为 non-authoritative，仅作调试记录。
+3. 历史记录中部分 `git_sha` 使用短 SHA 或缺失 dirty 标记：自本计划生效起，所有正式实验必须记录完整 40 位 SHA + `git_dirty` 标志 + 工作树 diff hash。
 
 **验收：** 所有 baseline 的官方代码/模型/数据来源可追溯；所有无法获取项有明确阻塞原因和替代策略。
 
@@ -844,6 +900,28 @@ python reproduction/harness/compare_outputs.py --reference ... --candidate ...
 - [ ] 至少一个独立 clean-checkout rerun 已通过。
 
 **未通过时的处理：** 继续修复复现或明确资源阻塞；不得提前开始 Phase II 并把未复现 baseline 排除在论文表格之外。
+
+### Phase I-a — Early viability gate（早期可行性筛选；不是 Gate 1）
+
+**定位与规则冲突的解决：** I-a 是 Gate 1 **之内**的早期筛选门，不是它的替代品，也不是缩短版的 Gate 1。它与"Phase I 完成前不进入 Phase II"纪律的关系如下：
+
+- **I-a 通过**：允许开始**有限的 Phase II 原型探索**（风险控制/退出信号算法原型）；但不得形成论文级方法结论，不得宣称已建立完整 SOTA 比较，GAINER/PRISM/MICE/CEC 等竞争方法不得从论文评价中排除。
+- **Gate 1 通过**：才允许形成正式的论文级方法结论与完整比较。
+- **I-a 失败**：优先重新考虑算法方向，而不是继续堆 scheduler 功能；Gate 1 的其余复现工作照常推进。
+- **Gate 1 未通过**：不得宣称新方法优于所有强基线。
+
+**范围（最小证据集）：** Shallow Cross-Encoders（官方 checkpoint inference，标 `R1-partial-checkpoint-only`）、full-depth MiniLM-L6、`cascade_shallow`、SEE 官方规则；数据集仅 SciFact + NFCorpus；R2/R3 闭环。
+
+**工时：** "约 2 周"仅为 timebox，不是工期预测。启动前必须先做一次 dry run，实测下载、推理、候选生成与评估耗时，再给出资源预算；dry run 结果记入 discrepancy log。
+
+**验收条件（全部满足才算通过）：**
+
+1. SciFact/NFCorpus 的 query IDs、qrels、候选 run 在任何实验前冻结，写入 manifest；candidate recall 单独报告。
+2. 所有方法使用同一候选池、相同候选数量、相同 tokenizer/truncation 与 CPU 计时边界。
+3. Shallow CE 与 SEE 必须使用可追溯的模型权重、退出层与规则配置（HF revision/文件 SHA、退出层编号、规则参数入 manifest）；不得只写"checkpoint inference"或"SEE rules"。
+4. 报告 nDCG@10、MRR、candidate recall、CPU-seconds/query、真实延迟与 95% CI（query-level paired bootstrap）。请求完成样本不足 10,000 时，不得把 p99 当作可靠尾延迟结论。
+
+**已知局限（必须同时写进 Gate A 的定义）：** I-a 只覆盖 2 个 BEIR 数据集，且不含 GAINER、CEC-Ranking、PRISM——因此 I-a 通过只能证明"方向值得继续投入"，不能证明"相对全部相关方法具有新颖性"。Gate A（算法有效性）的最终判定仍以 Gate 1 的完整 baseline 矩阵为准。
 
 ---
 
