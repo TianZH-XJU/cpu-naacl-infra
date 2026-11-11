@@ -188,6 +188,17 @@ infra/results/stage2b_stage3_report.md 中的 GAINER 数字（例如 current_ran
 
 要求：保留历史报告但加 SUPERSEDED / NON-AUTHORITATIVE 标记，列出 replacement run id、代码 SHA、差异来源。不能静默覆盖或把两个结果放进同一比较表。
 
+### P1-8. 数据 loader 静默覆盖重复 ID / qrels 项，输入完整性错误无法被发现
+
+文件：**cpu_cast/data.py**。
+
+- load_corpus() 与 load_queries() 直接按 ID 写入 dict；重复 _id 会覆盖先前记录，不计数、不报错；
+- load_qrels() 对重复的 (qid, docid) 直接覆盖旧 relevance；
+- load_qrels() 无条件丢弃第一行作为 header；输入格式不符合预期时，可能静默丢掉第一条真实 qrel；
+- loader 没有检查 qrels qid 是否存在 queries、qrels docid 是否存在 corpus，也没有输出 duplicate/missing counts。
+
+修复要求：读取时统计并拒绝重复 ID/key；按明确 schema 判断 header，而不是无条件跳过；对 qrels-corpus-query join 做完整性检查；生成 machine-readable validation report。任何缺失/重复不能仅打印 warning 后继续跑正式实验。
+
 ### P1-7. 当前硬件探针不能完整反映有效配额
 
 文件：**scripts/probe_hardware.py**。
