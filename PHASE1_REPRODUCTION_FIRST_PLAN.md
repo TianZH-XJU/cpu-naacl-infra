@@ -38,7 +38,7 @@ CPU-CAST 当前最缺少的不是更多模型、更多 scheduler 功能或新的
 
 ### 0.1 为什么 Phase I 必须先做
 
-Stage 4 v5（`infra/results/stage4_v5_report.md`，执行代码 `549fa7d8e782`）撤回了 v3 基于离线服务时间重放（measured_service_replay）得到的 wavefront 尾延迟恶化结论：那是重放模型的伪影，不是真实系统的行为。在 SciFact 的 30 请求、2 秒间隔负载剖面下，真实 wavefront 调度器相对真实 FIFO `SerialScheduler` 的 p50、p95、p99 三个分位点均更低（p50 约 −89%，p95/p99 约 −80%）。
+Stage 4 v3 基于离线服务时间重放（measured_service_replay）得到的 wavefront 尾延迟恶化结论已撤回：那是重放模型的伪影，不能代表真实在线调度行为。**进一步的代码审计又发现 v5 的 `SerialScheduler` 存在 P0 执行错误：逐层 forward 输出没有写回 hidden state，且 non-compacted 路径存在 active-local mask 与全量候选索引空间混用。** 因此 v5 报告中 wavefront 相对 FIFO `SerialScheduler` 的 p50/p95/p99 改善数字（p50 约 −89%、p95/p99 约 −80%）也必须标记为 `INVALID_COMPARATOR_PENDING_RERUN`，不得作为系统性能证据。wavefront 自身的历史 trace 可以保留作调试材料，但必须在修复 SerialScheduler、通过 parity tests 并用相同 arrival trace 重新配对运行后，才能重新讨论调度收益。
 
 但该结论必须连同其限制一起引用：
 
