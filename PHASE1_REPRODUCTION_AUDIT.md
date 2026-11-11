@@ -91,7 +91,7 @@
 - corpus/queries/qrels URL 使用 HF resolve/main/，未固定数据仓库的 immutable commit revision；
 - fetch() 只要目标文件存在且大小大于 0 就复用，不核验预期 SHA-256；
 - qrels 下载使用宽泛的 except Exception 并报告为 “no split qrels”，网络失败、服务端错误、权限错误也会被误报成 split 不存在；
-- manifest 只记录部分原始 parquet 哈希，没有同时记录 qrels repo revision、每份 qrels 原始 SHA、转化后 JSONL/TSV SHA，以及下载工具版本。
+- 当前 checked-in datasets_manifest.json 已包含部分 qrels_sha256（四个 BEIR 数据集）以及少量 SciFact candidate-run SHA；但这些字段并非由 download_datasets.py 生成/校验，下载脚本本身只写 corpus/queries parquet SHA 与 qrels 行数。manifest 也没有 pin qrels/dataset 的源 HF commit revision，没有覆盖所有 candidate runs（例如 NFCorpus）的完整 runfile hash，也没有转换后 corpus.jsonl / queries.jsonl / qrels TSV 的独立 hash。换言之，当前有部分事后补录的 hash，但还没有可 clean rebuild 的、端到端自洽的 immutable data manifest。
 
 这意味着相同命令在不同时间可能得到不同数据；已有缓存即使损坏、半旧或被人工替换，也会被当成正确文件。
 
