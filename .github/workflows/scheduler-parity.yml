@@ -1,0 +1,22 @@
+name: scheduler-parity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  toy-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CPU-only torch and transformers
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers
+      - name: Run deterministic scheduler parity tests (toy ranker)
+        run: python scripts/test_scheduler_toy.py
