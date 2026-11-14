@@ -177,6 +177,22 @@ def online_cross_query_parity(ranker, load_reqs, thresholds, checkpoints,
                 min_margin[layer] = round(min(ms_), 6)
     rows_executed = sum(int(e["batch_rows"]) for e in sched.layer_events)
     rows_scored = sum(int(e["scored_rows"]) for e in sched.layer_events)
+    # Full per-event trace (review 219060d0): absolute start/end, batch rows,
+    # participating queries — needed to attribute wavefront loss to embedding,
+    # batch assembly wait, large-batch forward, or scatter/gather.
+    trace = [{
+        "event_id": e["event_id"],
+        "layer": e["layer"],
+        "batch_rows": e["batch_rows"],
+        "scored_rows": e["scored_rows"],
+        "compacted": e["compacted"],
+        "n_queries": len(e["request_ids"]),
+        "gather_ms": e["gather_ms"],
+        "forward_ms": e["forward_ms"],
+        "scatter_ms": e["scatter_ms"],
+        "start_ms": e["start_ms"],
+        "end_ms": e["end_ms"],
+    } for e in sched.layer_events]
     return {
         "exit_mismatches": flips,
         "max_score_diff": round(max_diff, 8),
@@ -185,6 +201,7 @@ def online_cross_query_parity(ranker, load_reqs, thresholds, checkpoints,
         "rows_executed": rows_executed,
         "rows_scored": rows_scored,
         "layer_events": len(sched.layer_events),
+        "layer_event_trace": trace,
         "makespan_s": round(makespan_s, 3),
         "scores": {r.qid: r.scores.clone() for r in reqs},
     }
