@@ -1,8 +1,8 @@
 # Stage 4 Pilot v2 — 交接说明（handoff）
 
-**分支**: `vibe/fix-serial-scheduler-bdc178` (PR #2) · **HEAD**: `e0a4fac` + 本次提交
+**分支**: `vibe/fix-serial-scheduler-bdc178` (PR #2) · **HEAD**: `c8651b6` + 证据提交
 **日期**: 2026-11-14 · **审查来源**: 用户审查（问题 A/B + 协议问题）
-**状态**: 测量修复已完成并通过奇偶校验；pilot v2 已完成两轮（500ms/1000ms），在线跨 Query parity 通过
+**状态**: ✅ 测量修复完成、✅ 在线跨 Query parity 通过、✅ pilot v2 两轮完成（含层事件 trace）——**正式全量复跑仍按指示未启动**
 
 ## 1. 为什么之前"运行总是完不成"
 
@@ -21,9 +21,9 @@
 - **协议修复**：pilot 用独立种子（协议种子+1=20261110）从 100 个冻结 qid 随机抽 20 个，**到达顺序=抽样顺序**（不排序）；`load_frozen()` 同时校验 candidate run 与 qrels 的 SHA-256；p99 按冻结门槛不报告（`p99_reported: false` + 原因字段）。
 - 冻结文件 `manifests/stage4_protocol.json` **未改动**（遵守"不修改冻结文件"指示）。
 
-## 3. Pilot v2 结果（`artifacts/runs/stage4_pilot_v2.jsonl`，16 条记录）
+## 3. Pilot v2 最终结果（`artifacts/runs/stage4_pilot_v2.jsonl`，16 条记录，含 `layer_event_trace`）
 
-环境：4 vCPU / 2 torch 线程 / MiniLM-L-6-v2 / 20 qid（seed 20261110，随机到达顺序）/ `git_dirty=false` @ `e0a4fac`。
+环境：4 vCPU / 2 torch 线程 / MiniLM-L-6-v2 / 20 qid（seed 20261110，随机到达顺序）/ `git_dirty=false` @ `c8651b6`。两轮运行（修复 trace 前/后）parity 与质量结果逐位一致，延迟在噪声范围内。
 
 ### 在线跨 Query parity（核心新证据，两个负载点一致）
 
@@ -32,29 +32,42 @@
 - 决策幅度：checkpoint 1 最小 margin = 3e-05，checkpoint 3 = 4.8e-05；`flip_margins = []`
 - 结论：**跨 Query 大 batch 合并不改变真实 MiniLM 的退出决策**。延迟差异可解释为"相同计算决策下的 scheduler 差异"。
 
-### 4 点时间轴分解（每值 2 reps 平均，单位 ms）
+### 4 点时间轴分解（最终轮，单位 ms）
 
 | stagger | scheduler | p50 | p95 | T_activation(mean) | T_ready_queue(mean) | rows_executed | nDCG@10 |
 |---|---|---|---|---|---|---|---|
-| 500 | serial | 11048 | 23637 | 10137 | 0 | 7499 | 0.4141 |
-| 500 | wavefront | 31311 | 34990 | 600 | 2697 | 7038 | 0.4141 |
-| 1000 | serial | 6600 | 15004 | 5620 | 0 | 7499 | 0.4141 |
-| 1000 | wavefront | 23458 | 29414 | 544 | 1864 | 7038 | 0.4141 |
+| 500 | serial | 9917–10756 | 21950–22418 | 9233–9781 | 0 | 7499 | 0.4141 |
+| 500 | wavefront | 29932–30125 | 33710–33905 | 634–689 | 2513–2538 | 7038 | 0.4141 |
+| 1000 | serial | 5666–5837 | 13341–13544 | 4812–4926 | 0 | 7499 | 0.4141 |
+| 1000 | wavefront | 20759–21764 | 28744–30314 | 522–545 | 1233–1239 | 7038 | 0.4141 |
 
 - Serial 的瓶颈在 **T_activation**（单 worker 逐个 embed，后面的 query 排队等 embedding）。
-- Wavefront 的 embedding 很快（T_activation≈0.5–0.7s），但 **T_ready_queue≈1.9–2.7s**：候选激活后要等跨 Query 的层事件轮次。
-- 两者 nDCG@10 / MRR 完全一致（0.4141 / 0.4087），rows_executed 差异（7038 vs 7499）来自跨 Query 池化后的退出时点差异，质量无损失。
-- **Wavefront 在两个高负载点 p50 慢 2.8–3.5×**，与 pilot v1 结论一致，现在有了正确测量定义和 parity 背书。
+- Wavefront 的 embedding 很快（T_activation≈0.5–0.7s），但 **T_ready_queue≈1.2–2.5s**：候选激活后要等跨 Query 的层事件轮次。
+- 两者 nDCG@10 / MRR 完全一致（0.4141 / 0.4087），质量无损失；rows_executed 7038 vs 7499 来自跨 Query 池化后的退出时点差异。
+- **Wavefront 在两个高负载点 p50 慢 2.8–3.7×**，与 pilot v1 结论一致，现在有正确测量定义 + parity 背书。
 
-### 已知缺口（本次提交修复）
+### 层事件 trace（Wavefront 慢的机制定位）
 
-- pilot 此前只持久化了 layer event **数量**（39），未写出完整 per-event trace。本次提交在 `online_cross_query_parity` 记录中新增 `layer_event_trace`（event_id/layer/batch_rows/scored_rows/compacted/n_queries/gather/forward/scatter/start_ms/end_ms）。**需重跑一次 pilot 生成含 trace 的证据**（结果预期与本次一致，种子确定性）。
+39 个层事件，总 forward 时间 33.0s（makespan ≈40s 的 83%）：
+
+| layer | 事件数 | 平均参与 query 数 | 平均 batch rows | forward 均值/最大 (ms) |
+|---|---|---|---|---|
+| 0 | 10 | 2.7 | 200 | 940 / 1240 |
+| 1 | 9 | 3.0 | 222 | 1034 / 1208 |
+| 2 | 6 | 4.2 | 176 | 827 / 1239 |
+| 3 | 6 | 4.2 | 176 | 816 / 1211 |
+| 4 | 4 | 5.8 | 115 | 545 / 1208 |
+| 5 | 4 | 5.8 | 115 | 554 / 1271 |
+
+- 30/39 事件触发了 active-set compaction，但 batch 仍达 115–222 行（max_batch=256 封顶）。
+- **在 2 线程 CPU 上，~200 行的大 batch 每 event forward 要 0.8–1.2s**；一个候选要走到 layer 3 退出就要串行等待多个全局轮次 → 队头阻塞。Serial 用查询内 compaction 的小 batch（立即执行、不等全局层对齐），反而每行更便宜。
+- 这直接支持用户假设：**低核 CPU 上跨 Query 规则化大 batch 不如查询内 active-set compaction**。H2 的可研究方向应从"跨 Query wavefront"转向 CPU-aware compaction / 批大小控制 / 层内细粒度调度。
 
 ## 4. 下一步（按用户指示，勿越界）
 
-1. ✅ 测量修复 + 在线跨 Query parity（本提交）
-2. ⏳ 用修复后的脚本重跑 pilot v2（500ms/1000ms，同种子），获得含层事件 trace 的完整证据 → 提交
-3. ⏸ **不启动**正式全量复跑；若 parity 保持且 Wavefront 仍慢，记录 H2 负面结果
+1. ✅ 测量修复 + 在线跨 Query parity（`e0a4fac`）
+2. ✅ 层事件 trace 持久化（`c8651b6`）+ pilot v2 重跑（本证据提交，`git_dirty=false`）
+3. ⏸ **不启动**正式全量复跑——parity 通过且 Wavefront 仍显著更慢；等待用户决定：记录 H2 负面结果，或先探索 CPU-aware compaction / batch 控制变体
 4. ⏸ D003 (GAINER) / H1 线**暂不开始**
 5. 待办记录：正式协议 v2 应保留 `load_qids` 随机排列顺序（现文件为 sorted()，pilot 用独立种子抽样绕过）；p99 门槛保持 ≥10,000 完成数（当前规模只报 p50/p90/p95）
 
