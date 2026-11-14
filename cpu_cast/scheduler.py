@@ -27,6 +27,11 @@ Correctness invariants (tested in scripts/test_wavefront.py):
 - full-depth wavefront == per-query active-set execution (same policy)
 - pooler-path wavefront == per-query active-set execution (same policy)
 - batch overflow: no lost rows, no double execution, next_layer consistent
+- SerialScheduler (scripts/test_serial_scheduler.py): full-depth output ==
+  forward_full; fixed-threshold path == per-query active-set reference on
+  BOTH the compacted and non-compacted paths, including non-contiguous
+  active rows and no-survivor / all-survivor / single-candidate edges;
+  Serial and Wavefront agree per candidate under the same policy
 """
 import time
 
@@ -55,12 +60,18 @@ class Request:
         self.token_type_ids = token_type_ids
         self.n = input_ids.shape[0]
         self.arrival = float(arrival)   # seconds offset from run start
-        # All three timing fields are ABSOLUTE time.perf_counter() values;
-        # the caller converts to run-relative ms by subtracting its own t0
+        # All timing fields are ABSOLUTE time.perf_counter() values; the
+        # caller converts to run-relative ms by subtracting its own t0
         # (single convention across WavefrontScheduler and SerialScheduler).
-        self.submit_time = None         # wall clock when activated
-        self.first_exec_time = None     # wall clock of first execution
-        self.finish_time = None         # wall clock when last row completed
+        # Four-point timeline per request:
+        #   submit_time     scheduler starts processing the arrival (embed begin)
+        #   activation_time embedding completed (request is ready to execute)
+        #   first_exec_time request's first Transformer layer event starts
+        #   finish_time     last row completed
+        self.submit_time = None
+        self.activation_time = None
+        self.first_exec_time = None
+        self.finish_time = None
         self.layer_log = []             # structured per-layer entries (see run())
         self.done = None
         self.next_layer = None
@@ -96,6 +107,7 @@ class WavefrontScheduler:
             r.next_layer = torch.zeros(r.n, dtype=torch.long)
             r.exit_layer = torch.full((r.n,), L, dtype=torch.long)
             r.scores = torch.zeros(r.n)
+            r.activation_time = time.perf_counter()
 
     def _final_score_undone(self, requests):
         with torch.inference_mode():
@@ -116,6 +128,7 @@ class WavefrontScheduler:
         # previous run would produce negative latencies — review P0-5)
         for r in requests:
             r.submit_time = None
+            r.activation_time = None
             r.first_exec_time = None
             r.finish_time = None
             r.layer_log = []
@@ -132,9 +145,8 @@ class WavefrontScheduler:
                     newly = [r for r in pending if r.arrival <= now]
                     for r in newly:
                         t_e0 = time.perf_counter()
-                        self._embed([r])
                         r.submit_time = time.perf_counter()
-                        r.first_exec_time = time.perf_counter()
+                        self._embed([r])
                         r.embed_ms = (time.perf_counter() - t_e0) * 1000.0
                         active.append(r)
                     pending = [r for r in pending if r.arrival > now]
@@ -243,20 +255,6 @@ class WavefrontScheduler:
                     })
                 scatter_ms = (time.perf_counter() - t_s0) * 1000.0
 
-                self.layer_events.append({
-                    "event_id": event_id,
-                    "layer": layer,
-                    "request_ids": list(by_req.keys()),
-                    "request_rows": {qid: len(rows_q)
-                                     for qid, (_, rows_q) in by_req.items()},
-                    "batch_rows": len(rows),
-                    "scored_rows": scored_batch,
-                    "compacted": bool(compacted),
-                    "gather_ms": round(gather_ms, 3),
-                    "forward_ms": round(forward_ms, 3),
-                    "scatter_ms": round(scatter_ms, 3),
-                })
-
                 if layer == L - 1:
                     off = 0
                     for r, row_list, _ in meta:
@@ -272,6 +270,23 @@ class WavefrontScheduler:
                 for r, _, _ in meta:
                     if r.finish_time is None and bool(r.done.all()):
                         r.finish_time = now
+
+                event_end_clock = time.perf_counter()
+                self.layer_events.append({
+                    "event_id": event_id,
+                    "layer": layer,
+                    "request_ids": list(by_req.keys()),
+                    "request_rows": {qid: len(rows_q)
+                                     for qid, (_, rows_q) in by_req.items()},
+                    "batch_rows": len(rows),
+                    "scored_rows": scored_batch,
+                    "compacted": bool(compacted),
+                    "gather_ms": round(gather_ms, 3),
+                    "forward_ms": round(forward_ms, 3),
+                    "scatter_ms": round(scatter_ms, 3),
+                    "start_ms": round((event_start_clock - t0) * 1000, 1),
+                    "end_ms": round((event_end_clock - t0) * 1000, 1),
+                })
         self._final_score_undone(requests)
         return {r.qid: r.scores.clone() for r in requests}
 
@@ -313,10 +328,11 @@ class SerialScheduler:
                 if online and r.arrival > now_rel:
                     time.sleep(r.arrival - now_rel)
                 r.submit_time = time.perf_counter()
-                r.first_exec_time = r.submit_time
                 t_e0 = time.perf_counter()
                 r.hidden, r.ext_mask = self.ranker.embed(
                     r.input_ids, r.attention_mask, r.token_type_ids)
+                r.activation_time = time.perf_counter()
+                r.first_exec_time = r.activation_time
                 r.embed_ms = (time.perf_counter() - t_e0) * 1000.0
                 r.done = torch.zeros(r.n, dtype=torch.bool)
                 r.next_layer = torch.zeros(r.n, dtype=torch.long)
@@ -342,6 +358,13 @@ class SerialScheduler:
                     t_f0 = time.perf_counter()
                     h = self.ranker.forward_layer(h, m, layer)
                     forward_ms = (time.perf_counter() - t_f0) * 1000.0
+                    # write the forward output back into the request's hidden
+                    # state (regression guard: without this every layer would
+                    # re-execute on the raw embeddings)
+                    if compacted:
+                        r.hidden = r.hidden.index_copy(0, idx, h)
+                    else:
+                        r.hidden = h
                     # -- checkpoint scoring (= scatter) --
                     scored_rows = 0
                     t_s0 = time.perf_counter()
@@ -351,14 +374,16 @@ class SerialScheduler:
                         scored_rows = int(h.shape[0])
                         # when not compacted, h covers all n rows but only the
                         # active positions are decided — select them explicitly
-                        # (same misindexing class as the round-1 eh[~kl] bug)
+                        # and keep the finished mask in the SAME index space as
+                        # the scores it is applied to (active-local, not full-n:
+                        # cur[finished] would misindex on the non-compacted path)
                         cur_active = cur if compacted else cur[idx]
                         keep_active = cur_active >= self.thresholds[layer]
                         keep = torch.zeros(r.n, dtype=torch.bool)
                         keep[idx] = keep_active
                         finished = ~keep_active
                         r.exit_layer[idx[finished]] = layer + 1
-                        r.scores[idx[finished]] = cur[finished]
+                        r.scores[idx[finished]] = cur_active[finished]
                         r.done[idx[finished]] = True
                     scatter_ms = (time.perf_counter() - t_s0) * 1000.0
                     event_id = len(self.layer_events)
@@ -384,6 +409,8 @@ class SerialScheduler:
                         "gather_ms": round(gather_ms, 3),
                         "forward_ms": round(forward_ms, 3),
                         "scatter_ms": round(scatter_ms, 3),
+                        "start_ms": round((t_g0 - t0) * 1000, 1),
+                        "end_ms": round((time.perf_counter() - t0) * 1000, 1),
                     })
                 # final scoring of survivors (mirrors the serial reference)
                 idx = torch.nonzero(~r.done, as_tuple=True)[0]
@@ -403,6 +430,8 @@ class SerialScheduler:
                         "gather_ms": 0.0,
                         "forward_ms": 0.0,
                         "scatter_ms": s_ms,
+                        "start_ms": round((t_s0 - t0) * 1000, 1),
+                        "end_ms": round((time.perf_counter() - t0) * 1000, 1),
                     }
                     r.layer_log.append(entry)
                     # the event trace must contain every id a layer_log cites
